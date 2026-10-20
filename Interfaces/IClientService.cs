@@ -1,0 +1,24 @@
+using SmashPointBookingAPI.DTOs;
+
+namespace SmashPointBookingAPI.Interfaces;
+
+public interface IClientService
+{
+    Task<ClientDto> GetClientBySubdomainAsync(string subdomain);
+    Task<Guid> GetClientIdBySubdomainAsync(string subdomain);
+    Task<ClientDto> UpdateClientSettingsAsync(Guid clientId, UpdateClientSettingsRequest request);
+}
+
+public record ClientDto(
+    string Id,
+    string Name,
+    string Subdomain,
+    string? LogoUrl,
+    string PrimaryColor,
+    string AccentColor,
+    string? GcashNumber,
+    string? GcashAccountName,
+    object? PaymentMethods,
+    List<AmenityItemDto> AvailableAmenities,
+    int MaxAdvanceBookingDays   // ⭐ NEW
+);

@@ -1,0 +1,419 @@
+// Services/CourtService.cs
+using Microsoft.EntityFrameworkCore;
+using SmashPointBookingAPI.Data;
+using SmashPointBookingAPI.DTOs;
+using SmashPointBookingAPI.Entities;
+using SmashPointBookingAPI.Interfaces;
+
+namespace SmashPointBookingAPI.Services;
+
+public class CourtService : ICourtService
+{
+    private readonly AppDbContext _db;
+    private readonly IPricingRuleService _pricingRuleService;
+
+    public CourtService(AppDbContext db, IPricingRuleService pricingRuleService)
+    {
+        _db = db;
+        _pricingRuleService = pricingRuleService;
+    }
+
+    // ========================================
+    // ? MULTI-COURT METHODS (WITH CLIENT FILTER)
+    // ========================================
+
+    public async Task<List<CourtDto>> GetAllCourtsAsync(Guid clientId)
+    {
+        return await _db.Courts
+            .Where(c => c.ClientId == clientId)
+            .OrderBy(c => c.CreatedAt)
+            .Select(c => MapToDto(c))
+            .ToListAsync();
+    }
+
+    public async Task<CourtDto> GetCourtByIdAsync(Guid id, Guid clientId)
+    {
+        var court = await _db.Courts
+            .FirstOrDefaultAsync(c => c.Id == id && c.ClientId == clientId)
+            ?? throw new KeyNotFoundException("Court not found");
+        return MapToDto(court);
+    }
+
+    public async Task<CourtDto> CreateCourtAsync(CreateCourtRequest request, Guid clientId)
+    {
+        var court = new Court
+        {
+            Name = request.Name,
+            Type = request.Type,
+            Indoor = request.Indoor,
+            PricePerHour = request.PricePerHour,
+            PeakPricePerHour = request.PeakPricePerHour,
+            Amenities = request.Amenities ?? new List<string>(),
+            OpenTime = TimeOnly.Parse(request.OpenTime),
+            CloseTime = TimeOnly.Parse(request.CloseTime),
+            Dimensions = request.Dimensions ?? "",
+            Surface = request.Surface ?? "",
+            Status = "active",
+            Rating = 0,
+            ClientId = clientId
+        };
+        _db.Courts.Add(court);
+        await _db.SaveChangesAsync();
+        return MapToDto(court);
+    }
+
+    public async Task<CourtDto> UpdateCourtAsync(Guid id, UpdateCourtRequest request, Guid clientId)
+    {
+        var court = await _db.Courts
+            .FirstOrDefaultAsync(c => c.Id == id && c.ClientId == clientId)
+            ?? throw new KeyNotFoundException("Court not found");
+
+        if (request.Name is not null) court.Name = request.Name;
+        if (request.Type is not null) court.Type = request.Type;
+        if (request.Indoor.HasValue) court.Indoor = request.Indoor.Value;
+        if (request.PricePerHour.HasValue) court.PricePerHour = request.PricePerHour.Value;
+        if (request.PeakPricePerHour.HasValue) court.PeakPricePerHour = request.PeakPricePerHour.Value;
+        if (request.Description is not null) court.Description = request.Description;
+        if (request.Amenities is not null) court.Amenities = request.Amenities;
+        if (request.ImageUrl is not null) court.ImageUrl = request.ImageUrl;
+        if (request.Images is not null) court.Images = request.Images;
+        if (request.Status is not null) court.Status = request.Status;
+        if (request.OpenTime is not null) court.OpenTime = TimeOnly.Parse(request.OpenTime);
+        if (request.CloseTime is not null) court.CloseTime = TimeOnly.Parse(request.CloseTime);
+        if (request.Dimensions is not null) court.Dimensions = request.Dimensions;
+        if (request.Surface is not null) court.Surface = request.Surface;
+
+        await _db.SaveChangesAsync();
+        return MapToDto(court);
+    }
+
+    public async Task DeleteCourtAsync(Guid id, Guid clientId)
+    {
+        var court = await _db.Courts
+            .FirstOrDefaultAsync(c => c.Id == id && c.ClientId == clientId)
+            ?? throw new KeyNotFoundException("Court not found");
+        _db.Courts.Remove(court);
+        await _db.SaveChangesAsync();
+    }
+
+    // ========================================
+    // ? AVAILABILITY (COURT-SPECIFIC WITH CLIENT)
+    // ========================================
+    public async Task<List<TimeSlotAvailabilityDto>> GetCourtAvailabilityAsync(
+        Guid courtId,
+        DateTime date,
+        Guid clientId,
+        Guid? excludeBookingId = null)
+    {
+        date = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
+
+        var court = await _db.Courts
+            .Include(c => c.PricingRules)
+            .FirstOrDefaultAsync(c => c.Id == courtId && c.ClientId == clientId)
+            ?? throw new KeyNotFoundException("Court not found");
+
+        var openHour = court.OpenTime.Hour;
+        var closeHour = court.CloseTime.Hour;
+        if (closeHour == 0) closeHour = 24;
+
+        // ? Pull StartTime AND EndTime for every live slot on this court.
+        var bookedSlots = await _db.TimeSlots
+            .Where(s => s.Date.Date == date.Date
+                     && s.CourtId == courtId // ? CHANGED THIS LINE
+                     && s.Booking.ClientId == clientId
+                     && s.Booking.Id != (excludeBookingId ?? Guid.Empty)
+                     && s.Booking.Status != "cancelled"
+                     && s.Booking.Status != "expired"
+                     && s.Booking.Status != "rejected"
+                     && s.Booking.Status != "refunded")
+            .Select(s => new { s.StartTime, s.EndTime })
+            .ToListAsync();
+
+        var bookedSet = new HashSet<int>();
+        foreach (var bs in bookedSlots)
+        {
+            var startH = bs.StartTime.Hour;
+            var endH = bs.EndTime.Hour == 0 ? 24 : bs.EndTime.Hour;
+            for (int h = startH; h < endH; h++) bookedSet.Add(h);
+        }
+
+        var blockedDates = await _db.BlockedDates
+            .Where(b => b.Date.Date == date.Date
+                     && (b.CourtId == null || b.CourtId == courtId)
+                     && b.ClientId == clientId)
+            .ToListAsync();
+
+        var openPlayWindows = await _db.OpenPlaySessions
+            .Where(s => s.IsActive
+                     && s.ClientId == clientId
+                     && s.Date.Date == date.Date
+                     && s.SessionCourts.Any(sc => sc.CourtId == courtId))
+            .Select(s => new { s.StartTime, s.EndTime })
+            .ToListAsync();
+
+        var blockedSet = new HashSet<int>();
+        foreach (var bd in blockedDates)
+        {
+            if (bd.StartTime == null)
+            {
+                for (int h = openHour; h < closeHour; h++) blockedSet.Add(h);
+            }
+            else
+            {
+                var startH = bd.StartTime.Value.Hour;
+
+                // ?? FIX: If EndTime is 00:00, treat it as 24 (End of day)
+                var endH = bd.EndTime?.Hour ?? closeHour;
+                if (endH == 0) endH = 24;
+
+                for (int h = startH; h < endH; h++) blockedSet.Add(h);
+            }
+        }
+
+        var phTime = DateTime.UtcNow.AddHours(8);
+        var isToday = date.Date == phTime.Date;
+        var dateOnly = DateOnly.FromDateTime(date);
+
+        var slots = new List<TimeSlotAvailabilityDto>();
+
+        for (int h = openHour; h < closeHour; h++)
+        {
+            var slotTime = new TimeOnly(h % 24, 0);
+            var startTime = $"{h % 24:D2}:00";
+            var endTime = $"{(h + 1) % 24:D2}:00";
+
+            var isPast = isToday && (h < phTime.Hour || (h == phTime.Hour && 0 < phTime.Minute));
+            var isBooked = bookedSet.Contains(h);
+            var isBlocked = blockedSet.Contains(h);
+
+            var isOpenPlayBlocked = openPlayWindows.Any(w =>
+                w.StartTime.Hour <= h && h < (w.EndTime.Hour == 0 ? 24 : w.EndTime.Hour));
+
+            var slotPrice = _pricingRuleService.ResolvePriceFromCourt(court, dateOnly, slotTime);
+            var isPeak = slotPrice > court.PricePerHour;
+
+            slots.Add(new TimeSlotAvailabilityDto(
+                $"slot-{courtId}-{date:yyyy-MM-dd}-{h}",
+                date.ToString("yyyy-MM-dd"),
+                startTime, endTime,
+                !isPast && !isBooked && !isBlocked && !isOpenPlayBlocked,
+                slotPrice,
+                isPeak
+            ));
+        }
+
+        return slots;
+    }
+
+    // ========================================
+    // ? BLOCKED DATES (CLIENT-SPECIFIC)
+    // ========================================
+
+    public async Task<List<BlockedDateDto>> GetBlockedDatesAsync(Guid? courtId, Guid clientId)
+    {
+        var query = _db.BlockedDates.Where(b => b.ClientId == clientId);
+
+        if (courtId.HasValue)
+            query = query.Where(b => b.CourtId == courtId || b.CourtId == null);
+
+        return await query
+            .OrderBy(b => b.Date)
+            .Select(b => new BlockedDateDto(
+                b.Id.ToString(),
+                b.Date.ToString("yyyy-MM-dd"),
+                b.StartTime.HasValue ? b.StartTime.Value.ToString("HH:mm") : null,
+                b.EndTime.HasValue ? b.EndTime.Value.ToString("HH:mm") : null,
+                b.Reason
+            ))
+            .ToListAsync();
+    }
+
+    public async Task<BlockedDateDto> AddBlockedDateAsync(CreateBlockedDateRequest request, Guid? courtId, Guid clientId)
+    {
+        if (clientId == Guid.Empty)
+            throw new ArgumentException("ClientId is missing. Ensure the X-Client-Subdomain header is sent.");
+
+        if (!DateTime.TryParse(request.Date, out var parsedDate))
+            throw new ArgumentException("Invalid date format");
+
+        TimeOnly? startTime = null;
+        TimeOnly? endTime = null;
+
+        if (!string.IsNullOrEmpty(request.StartTime) && !string.IsNullOrEmpty(request.EndTime))
+        {
+            startTime = TimeOnly.Parse(request.StartTime);
+            endTime = TimeOnly.Parse(request.EndTime);
+
+            // ?? FIX: Allow 00:00 as a valid end time (Midnight)
+            if (endTime != TimeOnly.MinValue && endTime <= startTime)
+            {
+                throw new ArgumentException("End time must be after start time.");
+            }
+        }
+
+        var blocked = new BlockedDate
+        {
+            Id = Guid.NewGuid(),
+            CourtId = courtId,
+            ClientId = clientId,
+            Date = DateTime.SpecifyKind(parsedDate.Date, DateTimeKind.Utc),
+            StartTime = startTime,
+            EndTime = endTime,
+            Reason = request.Reason ?? "Maintenance",
+            CreatedAt = DateTime.UtcNow
+        };
+
+        _db.BlockedDates.Add(blocked);
+
+        try
+        {
+            await _db.SaveChangesAsync();
+        }
+        catch (DbUpdateException ex)
+        {
+            throw new Exception($"DB Error: {ex.InnerException?.Message ?? ex.Message}");
+        }
+
+        return new BlockedDateDto(
+            blocked.Id.ToString(),
+            blocked.Date.ToString("yyyy-MM-dd"),
+            blocked.StartTime?.ToString("HH:mm"),
+            blocked.EndTime?.ToString("HH:mm"),
+            blocked.Reason
+        );
+    }
+
+    public async Task DeleteBlockedDateAsync(Guid id, Guid clientId)
+    {
+        var blocked = await _db.BlockedDates
+            .FirstOrDefaultAsync(b => b.Id == id && b.ClientId == clientId)
+            ?? throw new KeyNotFoundException("Blocked date not found");
+        _db.BlockedDates.Remove(blocked);
+        await _db.SaveChangesAsync();
+    }
+
+    // ========================================
+    // ?? DEPRECATED - Single Court Methods
+    // ========================================
+
+    public async Task<CourtDto> GetCourtAsync()
+    {
+        var court = await _db.Courts.FirstOrDefaultAsync()
+            ?? throw new KeyNotFoundException("Court not found");
+        return MapToDto(court);
+    }
+
+    public async Task<List<TimeSlotAvailabilityDto>> GetAvailabilityAsync(DateTime date)
+    {
+        var court = await _db.Courts.FirstOrDefaultAsync()
+            ?? throw new KeyNotFoundException("Court not found");
+        return await GetCourtAvailabilityAsync(court.Id, date, court.ClientId);
+    }
+
+    public async Task<CourtDto> UpdateCourtSettingsAsync(UpdateCourtRequest request)
+    {
+        var court = await _db.Courts.FirstOrDefaultAsync()
+            ?? throw new KeyNotFoundException("Court not found");
+        return await UpdateCourtAsync(court.Id, request, court.ClientId);
+    }
+
+    // ========================================
+    // ? PRICE RULES (CLIENT-SPECIFIC)
+    // ========================================
+
+    public async Task<List<PriceRuleDto>> GetPriceRulesAsync(Guid clientId)
+    {
+        return await _db.PriceRules
+            .Where(r => r.ClientId == clientId && r.IsActive)
+            .OrderBy(r => r.Priority)
+            .ThenBy(r => r.DayOfWeek)
+            .Select(r => new PriceRuleDto(
+                r.Id.ToString(),
+                r.Name,
+                r.DayOfWeek,
+                r.StartTime.ToString("HH:mm"),
+                r.EndTime.ToString("HH:mm"),
+                r.PricePerHour,
+                r.IsActive,
+                r.Priority
+            ))
+            .ToListAsync();
+    }
+
+    public async Task<PriceRuleDto> CreatePriceRuleAsync(CreatePriceRuleRequest request, Guid clientId)
+    {
+        var rule = new PriceRule
+        {
+            Name = request.Name,
+            DayOfWeek = request.DayOfWeek,
+            StartTime = TimeOnly.Parse(request.StartTime),
+            EndTime = TimeOnly.Parse(request.EndTime),
+            PricePerHour = request.PricePerHour,
+            Priority = request.Priority,
+            ClientId = clientId
+        };
+        _db.PriceRules.Add(rule);
+        await _db.SaveChangesAsync();
+        return MapPriceRuleToDto(rule);
+    }
+
+    public async Task<PriceRuleDto> UpdatePriceRuleAsync(Guid id, UpdatePriceRuleRequest request, Guid clientId)
+    {
+        var rule = await _db.PriceRules
+            .FirstOrDefaultAsync(r => r.Id == id && r.ClientId == clientId)
+            ?? throw new KeyNotFoundException("Price rule not found");
+
+        if (request.Name is not null) rule.Name = request.Name;
+        if (request.DayOfWeek is not null) rule.DayOfWeek = request.DayOfWeek;
+        if (request.StartTime is not null) rule.StartTime = TimeOnly.Parse(request.StartTime);
+        if (request.EndTime is not null) rule.EndTime = TimeOnly.Parse(request.EndTime);
+        if (request.PricePerHour.HasValue) rule.PricePerHour = request.PricePerHour.Value;
+        if (request.IsActive.HasValue) rule.IsActive = request.IsActive.Value;
+        if (request.Priority.HasValue) rule.Priority = request.Priority.Value;
+        await _db.SaveChangesAsync();
+        return MapPriceRuleToDto(rule);
+    }
+
+    public async Task DeletePriceRuleAsync(Guid id, Guid clientId)
+    {
+        var rule = await _db.PriceRules
+            .FirstOrDefaultAsync(r => r.Id == id && r.ClientId == clientId)
+            ?? throw new KeyNotFoundException("Price rule not found");
+        _db.PriceRules.Remove(rule);
+        await _db.SaveChangesAsync();
+    }
+
+    // ========================================
+    // ? PRIVATE HELPERS
+    // ========================================
+
+    private static PriceRuleDto MapPriceRuleToDto(PriceRule r) => new(
+        r.Id.ToString(),
+        r.Name,
+        r.DayOfWeek,
+        r.StartTime.ToString("HH:mm"),
+        r.EndTime.ToString("HH:mm"),
+        r.PricePerHour,
+        r.IsActive,
+        r.Priority
+    );
+
+    private static CourtDto MapToDto(Court c) => new(
+        c.Id.ToString(),
+        c.Name,
+        c.Type,
+        c.Indoor,
+        c.PricePerHour,
+        c.PeakPricePerHour,
+        c.Description,
+        c.Amenities,
+        c.Rating,
+        c.ImageUrl,
+        c.Images,
+        c.Status,
+        c.OpenTime.ToString("HH:mm"),
+        c.CloseTime.ToString("HH:mm"),
+        c.Dimensions,
+        c.Surface
+    );
+}

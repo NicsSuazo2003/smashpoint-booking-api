@@ -65,5 +65,6 @@ public record UpdateClientSettingsRequest(
     string? GcashAccountName,
     object? PaymentMethods,
     List<AmenityItemDto>? AvailableAmenities,
-    int? MaxAdvanceBookingDays   // ? NEW
+    int? MaxAdvanceBookingDays,
+    bool? BookingsEnabled           // ⭐ NEW
 );

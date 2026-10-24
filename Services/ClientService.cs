@@ -58,6 +58,12 @@ public class ClientService : IClientService
             client.MaxAdvanceBookingDays = maxDays;
         }
 
+        // ⭐ NEW — Master online-bookings toggle
+        if (request.BookingsEnabled is bool b)
+        {
+            client.BookingsEnabled = b;
+        }
+
         // Cascade: strip removed amenities from every court of this client
         if (request.AvailableAmenities is not null)
         {
@@ -127,7 +133,8 @@ public class ClientService : IClientService
             client.AvailableAmenities
                 .Select(a => new AmenityItemDto(a.Name, a.Icon, a.Description))
                 .ToList(),
-            client.MaxAdvanceBookingDays
+            client.MaxAdvanceBookingDays,
+            client.BookingsEnabled          // ⭐ NEW
         );
     }
 }

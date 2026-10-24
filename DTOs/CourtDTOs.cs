@@ -52,6 +52,7 @@ public record UpdateCourtRequest(
 
 public record TimeSlotAvailabilityDto(
     string Id,
+    string CourtId,        // 👈 ADDED THIS LINE
     string Date,
     string StartTime,
     string EndTime,

@@ -193,13 +193,14 @@ public class CourtService : ICourtService
             var isPeak = slotPrice > court.PricePerHour;
 
             slots.Add(new TimeSlotAvailabilityDto(
-                $"slot-{courtId}-{date:yyyy-MM-dd}-{h}",
-                date.ToString("yyyy-MM-dd"),
-                startTime, endTime,
-                !isPast && !isBooked && !isBlocked && !isOpenPlayBlocked,
-                slotPrice,
-                isPeak
-            ));
+     $"slot-{courtId}-{date:yyyy-MM-dd}-{h}",
+     courtId.ToString(),                          // 👈 ADD THIS LINE
+     date.ToString("yyyy-MM-dd"),
+     startTime, endTime,
+     !isPast && !isBooked && !isBlocked && !isOpenPlayBlocked,
+     slotPrice,
+     isPeak
+ ));
         }
 
         return slots;

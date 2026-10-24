@@ -35,6 +35,11 @@ public class Client
     // 0 = no limit. Default = 90 days (~3 months).
     public int MaxAdvanceBookingDays { get; set; } = 90;
 
+    // ⭐ NEW — Master switch for customer-facing online bookings.
+    // Staff manual bookings (CreateStaffBookingAsync) are unaffected.
+    [Column("bookings_enabled")]
+    public bool BookingsEnabled { get; set; } = true;
+
     private DateTime _createdAt;
     public DateTime CreatedAt
     {

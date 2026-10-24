@@ -63,13 +63,16 @@ builder.Services.AddScoped<ClientResolver>();
 builder.Services.AddScoped<IClientService, ClientService>();
 builder.Services.AddHostedService<ExpiredBookingWorker>();
 
+// Security
+builder.Services.AddScoped<ISecurityLogger, SecurityLogger>();
+builder.Services.AddHostedService<SecurityRetentionWorker>();
+
 // Health Checks
 builder.Services.AddHealthChecks();
 
 builder.Services.AddSwaggerGen();
 
 // ─── CORS ─────────────────────────────────────────────────────────
-// Smash Point specific origins
 var corsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
     ?? new[] {
         "http://localhost:5173",
@@ -127,6 +130,9 @@ _ = Task.Run(async () =>
         // Don't crash the app if background startup work fails.
     }
 });
+
+// 👇 NEW: Security Headers Middleware
+app.UseMiddleware<SecurityHeadersMiddleware>();
 
 app.UseMiddleware<ExceptionMiddleware>();
 app.UseCors("Frontend");

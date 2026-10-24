@@ -19,6 +19,7 @@ public class AppDbContext : DbContext
     public DbSet<OpenPlaySession> OpenPlaySessions => Set<OpenPlaySession>();
     public DbSet<OpenPlaySessionCourt> OpenPlaySessionCourts => Set<OpenPlaySessionCourt>();
     public DbSet<PricingRule> PricingRules => Set<PricingRule>();
+    public DbSet<SecurityEventEntity> SecurityEvents => Set<SecurityEventEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

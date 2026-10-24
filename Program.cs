@@ -74,8 +74,7 @@ var corsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<st
     ?? new[] {
         "http://localhost:5173",
         "http://localhost:3000",
-        "https://smashpoint-booking.vercel.app",
-        "https://smashpoint.vercel.app"
+        "https://smashpoint-seven.vercel.app"
     };
 
 builder.Services.AddCors(options =>

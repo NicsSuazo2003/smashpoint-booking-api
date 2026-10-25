@@ -33,7 +33,8 @@ public class EmailService
     private const string WARNING = "#FFB703";
     private const string INFO = "#38BDF8";
 
-    private const string ADMIN_URL = "https://centercourt-booking.vercel.app/admin";
+    // ✅ UPDATED: Pointed to the new Smash Point Vercel deployment
+    private const string ADMIN_URL = "https://smashpointpicklecenter.vercel.app/admin";
 
     public EmailService(IConfiguration config, ILogger<EmailService> logger)
     {

@@ -154,10 +154,10 @@ public class BookingService : IBookingService
             try
             {
                 var courtIds = booking.Slots
-.Where(s => s.CourtId.HasValue)
-.Select(s => s.CourtId!.Value)
-.Distinct()
-.ToList();
+                    .Where(s => s.CourtId.HasValue)
+                    .Select(s => s.CourtId!.Value)
+                    .Distinct()
+                    .ToList();
 
                 var courts = await _db.Courts
                     .Where(c => courtIds.Contains(c.Id))
@@ -165,7 +165,7 @@ public class BookingService : IBookingService
 
                 var slotsText = string.Join(" | ", booking.Slots
                     .Where(s => s.CourtId.HasValue)
-                    .GroupBy(s => s.CourtId!.Value)   // now Guid
+                    .GroupBy(s => s.CourtId!.Value)
                     .Select(g =>
                     {
                         var courtName = courts.TryGetValue(g.Key, out var name) ? name : "Court";
@@ -475,8 +475,20 @@ public class BookingService : IBookingService
         }
     }
 
-    private static BookingDto MapToDto(Booking b, string courtName)
+    // ✅ UPDATED: No longer static, fetches actual court names for the slots
+    private BookingDto MapToDto(Booking b, string courtName)
     {
+        // Filter out any null CourtIds just in case
+        var courtIds = b.Slots
+            .Where(s => s.CourtId.HasValue)
+            .Select(s => s.CourtId!.Value)
+            .Distinct()
+            .ToList();
+
+        var courtNames = _db.Courts
+            .Where(c => courtIds.Contains(c.Id))
+            .ToDictionary(c => c.Id, c => c.Name);
+
         return new BookingDto(
             b.Id.ToString(),
             b.CourtId.ToString(),
@@ -486,15 +498,23 @@ public class BookingService : IBookingService
             b.CustomerPhone,
             b.ReferenceCode,
             b.Date.ToString("yyyy-MM-dd"),
-            b.Slots.Select(s => new TimeSlotDto(
-                s.Id.ToString(),
-                s.CourtId.ToString(),
-                s.Date.ToString("yyyy-MM-dd"),
-                s.StartTime.ToString("HH:mm"),
-                s.EndTime.ToString("HH:mm"),
-                false,
-                s.Price
-            )).ToList(),
+            b.Slots.Select(s =>
+            {
+                // ✅ FIX: Extract the Guid value first to avoid Nullable<Guid> mismatch
+                var cId = s.CourtId.GetValueOrDefault();
+                var name = courtNames.TryGetValue(cId, out var resolvedName) ? resolvedName : "Court";
+
+                return new TimeSlotDto(
+                    s.Id.ToString(),
+                    cId.ToString(),
+                    name,
+                    s.Date.ToString("yyyy-MM-dd"),
+                    s.StartTime.ToString("HH:mm"),
+                    s.EndTime.ToString("HH:mm"),
+                    false,
+                    s.Price
+                );
+            }).ToList(),
             b.TotalAmount,
             b.Status,
             b.PaymentMethod,
@@ -771,21 +791,23 @@ public class BookingService : IBookingService
             }
         }
 
+        var previousDate = booking.Date;
+        var previousCourtId = booking.CourtId;
+        var previousCourtName = booking.Court?.Name ?? "";
+        var previousAmount = booking.TotalAmount;
+
         var previousSlots = booking.Slots
             .OrderBy(s => s.StartTime)
             .Select(s => new TimeSlotDto(
                 s.Id.ToString(),
                 s.CourtId.ToString(),
+                previousCourtName, // ✅ Added CourtName
                 s.Date.ToString("yyyy-MM-dd"),
                 s.StartTime.ToString("HH:mm"),
                 s.EndTime.ToString("HH:mm"),
                 false,
                 s.Price))
             .ToList();
-        var previousDate = booking.Date;
-        var previousCourtId = booking.CourtId;
-        var previousCourtName = booking.Court?.Name ?? "";
-        var previousAmount = booking.TotalAmount;
 
         var dateOnly = DateOnly.FromDateTime(targetDate);
         decimal newTotal = 0m;
@@ -865,7 +887,8 @@ public class BookingService : IBookingService
             previousAmount,
             newTotal,
             balanceDue,
-            refundDue);
+            refundDue
+        );
     }
 
     public async Task<List<BookingSummaryDto>> TrackBookingSummariesByEmailAsync(string email, Guid clientId)

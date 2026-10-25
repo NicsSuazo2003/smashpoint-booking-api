@@ -41,7 +41,8 @@ public record BookingDto(
 
 public record TimeSlotDto(
     string Id,
-    string CourtId,   // ?? ADDED
+    string CourtId,
+    string CourtName, // ✅ ADDED: Resolves the name server-side
     string Date,
     string StartTime,
     string EndTime,

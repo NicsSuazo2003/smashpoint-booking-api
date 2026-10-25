@@ -1,5 +1,5 @@
-﻿// Services/EmailService.cs
-using System.Net.Http.Json;
+﻿using System.Net.Http.Json;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace SmashPointBookingAPI.Services;
@@ -9,35 +9,29 @@ public class EmailService
     private readonly IConfiguration _config;
     private readonly ILogger<EmailService> _logger;
 
-    // ── Neutrals — Carbon Pitch (from tailwind neutral/forest/charcoal) ──
-    private const string OUTER_BG = "#0A0B0D";      // charcoal / neutral-950 (base canvas)
-    private const string BODY_BG = "#111317";       // neutral-900 (cards & elevated panels)
-    private const string CARD_BG = "#1D2028";       // neutral-800
-    private const string BANNER_BG = "#1D2028";     // neutral-800
-    private const string DIVIDER = "#313642";       // neutral-700
-    private const string BORDER_SOFT = "#454C5B";   // neutral-600
+    // ── Neutrals — Carbon Pitch ──
+    private const string OUTER_BG = "#0A0B0D";
+    private const string BODY_BG = "#111317";
+    private const string BANNER_BG = "#1D2028";
+    private const string DIVIDER = "#313642";
 
     // ── Primary — Championship Red ──
-    private const string PRIMARY = "#ED1C24";       // primary-500
-    private const string PRIMARY_HOVER = "#D20D1A"; // primary-600
-    private const string PRIMARY_DEEP = "#920A15";  // primary-800
-    private const string PRIMARY_TEXT = "#FFFFFF";  // white text on red
+    private const string PRIMARY = "#ED1C24";
+    private const string PRIMARY_TEXT = "#FFFFFF";
 
     // ── Accent — Optic Court Gold ──
-    private const string ACCENT = "#FFB703";        // accent-500 / gold-500
-    private const string ACCENT_SOFT = "#FFD443";   // accent-300
-    private const string ACCENT_TEXT = "#0A0B0D";   // charcoal (dark text on gold)
+    private const string ACCENT = "#FFB703";
 
     // ── Cream / Silver White ──
-    private const string TEXT_CREAM = "#FFFFFF";        // cream DEFAULT
-    private const string TEXT_CREAM_DARK = "#EEF2F6";   // cream-dark
-    private const string TEXT_CREAM_MUTED = "#7A8395";  // cream-muted (neutral-400)
+    private const string TEXT_CREAM = "#FFFFFF";
+    private const string TEXT_CREAM_DARK = "#EEF2F6";
+    private const string TEXT_CREAM_MUTED = "#7A8395";
 
     // ── Semantic ──
-    private const string SUCCESS = "#10B981";   // success-500
-    private const string ERROR = "#ED1C24";     // error-500 (brand red)
-    private const string WARNING = "#FFB703";   // warning-500 (gold)
-    private const string INFO = "#38BDF8";      // sky-400 (matches frontend cyan accents)
+    private const string SUCCESS = "#10B981";
+    private const string ERROR = "#ED1C24";
+    private const string WARNING = "#FFB703";
+    private const string INFO = "#38BDF8";
 
     private const string ADMIN_URL = "https://centercourt-booking.vercel.app/admin";
 
@@ -80,14 +74,15 @@ public class EmailService
             return string.Join(" | ", input.Split('|').Select(part =>
             {
                 var trimmed = part.Trim();
-                var lastColon = trimmed.LastIndexOf(':');
+                // Match "Court Name" + ":" + "HH:mm-HH:mm"
+                var match = Regex.Match(trimmed, @"^(.*?):\s*(\d{1,2}:\d{2}.*)$");
 
-                if (lastColon > 0)
+                if (match.Success)
                 {
-                    var courtName = trimmed.Substring(0, lastColon).Trim();
-                    var timeRange = trimmed.Substring(lastColon + 1).Trim();
-
+                    var courtName = match.Groups[1].Value.Trim();
+                    var timeRange = match.Groups[2].Value.Trim();
                     var parts = Regex.Split(timeRange, @"\s*[-–—]\s*");
+
                     if (parts.Length == 2)
                     {
                         return $"{courtName}: {FormatTime(parts[0])} – {FormatTime(parts[1])}";
@@ -97,6 +92,21 @@ public class EmailService
             }));
         }
 
+        // ?? Handle single court string like "Court 3: 22:00-23:00"
+        var singleMatch = Regex.Match(input.Trim(), @"^(.*?):\s*(\d{1,2}:\d{2}.*)$");
+        if (singleMatch.Success)
+        {
+            var courtName = singleMatch.Groups[1].Value.Trim();
+            var timeRange = singleMatch.Groups[2].Value.Trim();
+            var parts = Regex.Split(timeRange, @"\s*[-–—]\s*");
+
+            if (parts.Length == 2)
+            {
+                return $"{courtName}: {FormatTime(parts[0])} – {FormatTime(parts[1])}";
+            }
+        }
+
+        // Fallback for just time ranges without a court name
         var singleParts = Regex.Split(input.Trim(), @"\s*[-–—]\s*");
         if (singleParts.Length == 2)
         {
@@ -118,7 +128,7 @@ public class EmailService
         return input;
     }
 
-    // ?? Shared layout — Smash Point (Carbon + Championship Red + Gold)
+    // ?? Shared layout — Smash Point
     private static string WrapLayout(string bannerTitle, string contentHtml)
     {
         return $@"
@@ -134,13 +144,12 @@ public class EmailService
   <table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='background-color:{OUTER_BG};padding:24px 12px;'>
     <tr>
       <td align='center'>
-
         <table role='presentation' width='100%' cellpadding='0' cellspacing='0' border='0' style='max-width:560px;background-color:{BODY_BG};border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.55),0 0 0 1px rgba(255,255,255,0.04);'>
-
-          <!-- ¦¦ Smash Point banner header ¦¦ -->
+          
+          <!-- Banner Header -->
           <tr>
             <td style='background-color:{BANNER_BG};border-bottom:2px solid {PRIMARY};padding:26px 32px 22px;text-align:left;'>
-              <div style='font-size:11px;font-weight:800;letter-spacing:2.5px;color:{ACCENT};text-transform:uppercase;margin-bottom:6px;font-family:-apple-system,BlinkMacSystemFont,""Segoe UI"",Roboto,Helvetica,Arial,sans-serif;'>
+              <div style='font-size:11px;font-weight:800;letter-spacing:2.5px;color:{ACCENT};text-transform:uppercase;margin-bottom:6px;'>
                 SMASH POINT
               </div>
               <div style='font-size:24px;font-weight:800;color:{TEXT_CREAM};line-height:1.2;margin:0;letter-spacing:-0.3px;'>
@@ -149,14 +158,14 @@ public class EmailService
             </td>
           </tr>
 
-          <!-- ¦¦ Body content ¦¦ -->
+          <!-- Body Content -->
           <tr>
             <td style='padding:32px;'>
               {contentHtml}
             </td>
           </tr>
 
-          <!-- ¦¦ Footer ¦¦ -->
+          <!-- Footer -->
           <tr>
             <td style='padding:20px 32px 26px;border-top:1px solid {DIVIDER};'>
               <div style='font-size:11px;color:{TEXT_CREAM_MUTED};text-align:center;line-height:1.6;'>
@@ -175,7 +184,6 @@ public class EmailService
 </html>";
     }
 
-    // ?? Key-value row — muted label + white value
     private static string KvRow(string label, string value, bool isLast = false)
     {
         var border = isLast ? "" : $"border-bottom:1px solid {DIVIDER};";
@@ -192,7 +200,6 @@ public class EmailService
               </tr>";
     }
 
-    // ?? Championship Red CTA button (primary action)
     private static string CtaButton(string url, string text)
     {
         return $@"
@@ -207,7 +214,6 @@ public class EmailService
               </table>";
     }
 
-    // ?? Status chip — soft fill + colored border, matching frontend badges
     private static string StatusChip(string text, string color)
     {
         return $@"
@@ -247,8 +253,9 @@ public class EmailService
             ";
 
             var html = WrapLayout("New Booking", content);
+            // REMOVED EMOJI FROM SUBJECT
             await SendAsync(apiKey, senderEmail, senderName, adminEmail, "Admin",
-                $"?? New Booking: {referenceCode} — {customerName}", html);
+                $"New Booking: {referenceCode} — {customerName}", html);
         }
         catch (Exception ex)
         {
@@ -302,8 +309,9 @@ public class EmailService
             ";
 
             var html = WrapLayout("Booking Confirmed", content);
+            // REMOVED EMOJI FROM SUBJECT
             await SendAsync(apiKey, senderEmail, senderName, customerEmail, customerName,
-                $"? Booking Confirmed: {referenceCode}", html);
+                $"Booking Confirmed: {referenceCode}", html);
         }
         catch (Exception ex)
         {
@@ -372,8 +380,9 @@ public class EmailService
             ";
 
             var html = WrapLayout("Booking Not Approved", content);
+            // REMOVED EMOJI FROM SUBJECT
             await SendAsync(apiKey, senderEmail, senderName, customerEmail, customerName,
-                $"? Booking Not Approved: {referenceCode}", html);
+                $"Booking Not Approved: {referenceCode}", html);
         }
         catch (Exception ex)
         {
@@ -442,8 +451,9 @@ public class EmailService
             ";
 
             var html = WrapLayout("Booking Cancelled", content);
+            // REMOVED EMOJI FROM SUBJECT
             await SendAsync(apiKey, senderEmail, senderName, customerEmail, customerName,
-                $"?? Booking Cancelled: {referenceCode}", html);
+                $"Booking Cancelled: {referenceCode}", html);
         }
         catch (Exception ex)
         {
@@ -516,8 +526,9 @@ public class EmailService
             ";
 
             var html = WrapLayout("Booking Refunded", content);
+            // REMOVED EMOJI FROM SUBJECT
             await SendAsync(apiKey, senderEmail, senderName, customerEmail, customerName,
-                $"?? Booking Refunded: {referenceCode}", html);
+                $"Booking Refunded: {referenceCode}", html);
         }
         catch (Exception ex)
         {
@@ -594,8 +605,9 @@ public class EmailService
             ";
 
             var html = WrapLayout("Booking Rescheduled", content);
+            // REMOVED EMOJI FROM SUBJECT
             await SendAsync(apiKey, senderEmail, senderName, customerEmail, customerName,
-                $"?? Booking Rescheduled: {referenceCode}", html);
+                $"Booking Rescheduled: {referenceCode}", html);
         }
         catch (Exception ex)
         {
@@ -633,7 +645,11 @@ public class EmailService
 
         var request = new HttpRequestMessage(HttpMethod.Post, "https://api.brevo.com/v3/smtp/email")
         {
-            Content = JsonContent.Create(payload)
+            // FORCE UTF-8 ENCODING SO THE PESO SYMBOL (₱) DOES NOT BECOME '?'
+            Content = new StringContent(
+                System.Text.Json.JsonSerializer.Serialize(payload),
+                Encoding.UTF8,
+                "application/json")
         };
         request.Headers.Add("api-key", apiKey);
 
@@ -646,7 +662,7 @@ public class EmailService
         }
         else
         {
-            _logger.LogInformation("Email sent ? {To} ({Subject})", toEmail, subject);
+            _logger.LogInformation("Email sent successfully to {To} ({Subject})", toEmail, subject);
         }
     }
 }

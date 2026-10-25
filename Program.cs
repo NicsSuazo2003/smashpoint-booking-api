@@ -73,17 +73,26 @@ builder.Services.AddHealthChecks();
 builder.Services.AddSwaggerGen();
 
 // ─── CORS ─────────────────────────────────────────────────────────
+// ✅ UPDATED: Added the new Vercel URL (smashpointpicklecenter.vercel.app)
 var corsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
     ?? new[] {
         "http://localhost:5173",
         "http://localhost:3000",
-        "https://smashpoint-seven.vercel.app"
+        "https://smashpoint-seven.vercel.app",
+        "https://smashpointpicklecenter.vercel.app"  // 👈 NEW URL
     };
+
+// Ensure the new URL is always allowed, even if the env var overrides it
+var finalCorsOrigins = corsOrigins.ToList();
+if (!finalCorsOrigins.Contains("https://smashpointpicklecenter.vercel.app"))
+{
+    finalCorsOrigins.Add("https://smashpointpicklecenter.vercel.app");
+}
 
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("Frontend", policy =>
-        policy.WithOrigins(corsOrigins)
+        policy.WithOrigins(finalCorsOrigins.ToArray())
             .AllowAnyHeader()
             .AllowAnyMethod()
             .AllowCredentials());

@@ -41,7 +41,9 @@ public class EmailService
         _logger = logger;
     }
 
-    // ? Time formatting
+    // -------------------------------------------------------------
+    // Time formatting
+    // -------------------------------------------------------------
     private static string FormatTime(string input)
     {
         if (string.IsNullOrWhiteSpace(input)) return input;
@@ -64,56 +66,53 @@ public class EmailService
         return $"{hour12}:{minute} {period}";
     }
 
+    // Matches one "start-end" slot, e.g. "20:00-21:00" or "8:00 PM - 9:00 PM"
+    private static readonly Regex SlotRx = new(
+        @"(\d{1,2}:\d{2}(?:\s*[AP]M)?)\s*[-–—]\s*(\d{1,2}:\d{2}(?:\s*[AP]M)?)",
+        RegexOptions.IgnoreCase);
+
+    // Handles:
+    //   "20:00-21:00"
+    //   "Court 3: 20:00-21:00"
+    //   "Court 3: 20:00-21:00, 21:00-22:00"           (multi-slot, merged if back-to-back)
+    //   "Court 1: 07:00-08:00 | Court 2: 07:00-08:00" (multi-court)
     private static string FormatTimeRange(string input)
     {
         if (string.IsNullOrWhiteSpace(input)) return input;
+        return string.Join(" | ", input.Split('|').Select(FormatSegment));
+    }
 
-        // ?? Handle multi-court strings like "Court 1: 07:00-08:00 | Court 2: 07:00-08:00"
-        if (input.Contains('|'))
+    private static string FormatSegment(string segment)
+    {
+        segment = segment.Trim();
+        string? court = null;
+        var times = segment;
+
+        var m = Regex.Match(segment, @"^(.*?):\s*(\d{1,2}:\d{2}.*)$");
+        if (m.Success)
         {
-            return string.Join(" | ", input.Split('|').Select(part =>
-            {
-                var trimmed = part.Trim();
-                // Match "Court Name" + ":" + "HH:mm-HH:mm"
-                var match = Regex.Match(trimmed, @"^(.*?):\s*(\d{1,2}:\d{2}.*)$");
-
-                if (match.Success)
-                {
-                    var courtName = match.Groups[1].Value.Trim();
-                    var timeRange = match.Groups[2].Value.Trim();
-                    var parts = Regex.Split(timeRange, @"\s*[-–—]\s*");
-
-                    if (parts.Length == 2)
-                    {
-                        return $"{courtName}: {FormatTime(parts[0])} – {FormatTime(parts[1])}";
-                    }
-                }
-                return trimmed;
-            }));
+            court = m.Groups[1].Value.Trim();
+            times = m.Groups[2].Value;
         }
 
-        // ?? Handle single court string like "Court 3: 22:00-23:00"
-        var singleMatch = Regex.Match(input.Trim(), @"^(.*?):\s*(\d{1,2}:\d{2}.*)$");
-        if (singleMatch.Success)
-        {
-            var courtName = singleMatch.Groups[1].Value.Trim();
-            var timeRange = singleMatch.Groups[2].Value.Trim();
-            var parts = Regex.Split(timeRange, @"\s*[-–—]\s*");
+        var slots = SlotRx.Matches(times)
+            .Select(x => (Start: x.Groups[1].Value.Trim(), End: x.Groups[2].Value.Trim()))
+            .ToList();
 
-            if (parts.Length == 2)
-            {
-                return $"{courtName}: {FormatTime(parts[0])} – {FormatTime(parts[1])}";
-            }
+        if (slots.Count == 0) return segment;
+
+        // Merge contiguous slots: 20:00-21:00 + 21:00-22:00 => 20:00-22:00
+        var merged = new List<(string Start, string End)>();
+        foreach (var s in slots)
+        {
+            if (merged.Count > 0 && merged[^1].End == s.Start)
+                merged[^1] = (merged[^1].Start, s.End);
+            else
+                merged.Add(s);
         }
 
-        // Fallback for just time ranges without a court name
-        var singleParts = Regex.Split(input.Trim(), @"\s*[-–—]\s*");
-        if (singleParts.Length == 2)
-        {
-            return $"{FormatTime(singleParts[0])} – {FormatTime(singleParts[1])}";
-        }
-
-        return FormatTime(input);
+        var text = string.Join(", ", merged.Select(s => $"{FormatTime(s.Start)} – {FormatTime(s.End)}"));
+        return court == null ? text : $"{court}: {text}";
     }
 
     private static string FormatDate(string input)
@@ -128,7 +127,18 @@ public class EmailService
         return input;
     }
 
-    // ?? Shared layout — Smash Point
+    // Normalizes any amount string (e.g. "?1,000.00", "₱1000") into "₱1,000.00"-style output
+    // using an HTML entity so it renders correctly regardless of upstream encoding issues.
+    private static string FormatAmount(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input)) return input ?? "";
+        var m = Regex.Match(input, @"[\d,]+(\.\d+)?");
+        return m.Success ? "&#8369;" + m.Value : input;
+    }
+
+    // -------------------------------------------------------------
+    // Shared layout — Smash Point
+    // -------------------------------------------------------------
     private static string WrapLayout(string bannerTitle, string contentHtml)
     {
         return $@"
@@ -246,14 +256,13 @@ public class EmailService
                 {KvRow("Customer", customerName)}
                 {KvRow("Reference", referenceCode)}
                 {KvRow("Schedule", $"{prettyDate} · {prettyTime}")}
-                {KvRow("Amount", amount, isLast: true)}
+                {KvRow("Amount", FormatAmount(amount), isLast: true)}
               </table>
 
               {CtaButton(ADMIN_URL, "Review in Admin Panel")}
             ";
 
             var html = WrapLayout("New Booking", content);
-            // REMOVED EMOJI FROM SUBJECT
             await SendAsync(apiKey, senderEmail, senderName, adminEmail, "Admin",
                 $"New Booking: {referenceCode} — {customerName}", html);
         }
@@ -286,7 +295,7 @@ public class EmailService
 
             var amountRow = string.IsNullOrWhiteSpace(amount)
                 ? ""
-                : KvRow("Amount Paid", amount);
+                : KvRow("Amount Paid", FormatAmount(amount));
 
             var content = $@"
               <p style='margin:0 0 8px;font-size:15px;color:{TEXT_CREAM_DARK};'>
@@ -309,7 +318,6 @@ public class EmailService
             ";
 
             var html = WrapLayout("Booking Confirmed", content);
-            // REMOVED EMOJI FROM SUBJECT
             await SendAsync(apiKey, senderEmail, senderName, customerEmail, customerName,
                 $"Booking Confirmed: {referenceCode}", html);
         }
@@ -343,7 +351,7 @@ public class EmailService
 
             var amountRow = string.IsNullOrWhiteSpace(amount)
                 ? ""
-                : KvRow("Amount Paid", amount);
+                : KvRow("Amount Paid", FormatAmount(amount));
 
             var reasonBlock = string.IsNullOrWhiteSpace(reason)
                 ? ""
@@ -380,7 +388,6 @@ public class EmailService
             ";
 
             var html = WrapLayout("Booking Not Approved", content);
-            // REMOVED EMOJI FROM SUBJECT
             await SendAsync(apiKey, senderEmail, senderName, customerEmail, customerName,
                 $"Booking Not Approved: {referenceCode}", html);
         }
@@ -414,7 +421,7 @@ public class EmailService
 
             var amountRow = string.IsNullOrWhiteSpace(amount)
                 ? ""
-                : KvRow("Amount Paid", amount);
+                : KvRow("Amount Paid", FormatAmount(amount));
 
             var reasonBlock = string.IsNullOrWhiteSpace(reason)
                 ? ""
@@ -451,7 +458,6 @@ public class EmailService
             ";
 
             var html = WrapLayout("Booking Cancelled", content);
-            // REMOVED EMOJI FROM SUBJECT
             await SendAsync(apiKey, senderEmail, senderName, customerEmail, customerName,
                 $"Booking Cancelled: {referenceCode}", html);
         }
@@ -485,7 +491,7 @@ public class EmailService
 
             var amountRow = string.IsNullOrWhiteSpace(amount)
                 ? ""
-                : KvRow("Amount Refunded", amount);
+                : KvRow("Amount Refunded", FormatAmount(amount));
 
             var reasonBlock = string.IsNullOrWhiteSpace(reason)
                 ? ""
@@ -526,7 +532,6 @@ public class EmailService
             ";
 
             var html = WrapLayout("Booking Refunded", content);
-            // REMOVED EMOJI FROM SUBJECT
             await SendAsync(apiKey, senderEmail, senderName, customerEmail, customerName,
                 $"Booking Refunded: {referenceCode}", html);
         }
@@ -566,7 +571,7 @@ public class EmailService
 
             var amountRow = string.IsNullOrWhiteSpace(amount)
                 ? ""
-                : KvRow("New Total", amount, isLast: string.IsNullOrWhiteSpace(reason));
+                : KvRow("New Total", FormatAmount(amount), isLast: string.IsNullOrWhiteSpace(reason));
 
             var reasonBlock = string.IsNullOrWhiteSpace(reason)
                 ? ""
@@ -605,7 +610,6 @@ public class EmailService
             ";
 
             var html = WrapLayout("Booking Rescheduled", content);
-            // REMOVED EMOJI FROM SUBJECT
             await SendAsync(apiKey, senderEmail, senderName, customerEmail, customerName,
                 $"Booking Rescheduled: {referenceCode}", html);
         }
@@ -616,7 +620,7 @@ public class EmailService
     }
 
     // -------------------------------------------------------------
-    // ?? Shared sender
+    // Shared sender
     // -------------------------------------------------------------
     private async Task SendAsync(
         string? apiKey,
@@ -645,7 +649,7 @@ public class EmailService
 
         var request = new HttpRequestMessage(HttpMethod.Post, "https://api.brevo.com/v3/smtp/email")
         {
-            // FORCE UTF-8 ENCODING SO THE PESO SYMBOL (₱) DOES NOT BECOME '?'
+            // Force UTF-8 so non-ASCII characters (— · –) are preserved
             Content = new StringContent(
                 System.Text.Json.JsonSerializer.Serialize(payload),
                 Encoding.UTF8,

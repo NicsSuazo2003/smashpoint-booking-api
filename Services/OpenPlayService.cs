@@ -433,6 +433,7 @@ public class OpenPlayService : IOpenPlayService
         );
     }
 
+    // ✅ FIXED: Added CourtName to TimeSlotDto
     private static BookingDto MapToBookingDto(Booking b, string courtName)
     {
         return new BookingDto(
@@ -446,7 +447,8 @@ public class OpenPlayService : IOpenPlayService
             b.Date.ToString("yyyy-MM-dd"),
             b.Slots.Select(s => new TimeSlotDto(
                 s.Id.ToString(),
-                s.CourtId.ToString(), // 👈 ADDED THIS LINE
+                s.CourtId.ToString(),
+                courtName, // <--- ADDED THIS LINE
                 s.Date.ToString("yyyy-MM-dd"),
                 s.StartTime.ToString("HH:mm"),
                 s.EndTime.ToString("HH:mm"),

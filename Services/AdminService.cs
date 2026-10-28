@@ -17,11 +17,18 @@ public class AdminService : IAdminService
     // ANALYTICS
     // ========================================
 
-    public async Task<AnalyticsDto> GetAnalyticsAsync(Guid clientId)
+    public async Task<AnalyticsDto> GetAnalyticsAsync(Guid clientId, DateTime? startDate = null, DateTime? endDate = null)
     {
-        var bookings = await _db.Bookings
-            .Where(b => b.ClientId == clientId)
-            .ToListAsync();
+        var query = _db.Bookings.Where(b => b.ClientId == clientId);
+
+        // ✅ Apply custom date filters if provided
+        if (startDate.HasValue)
+            query = query.Where(b => b.Date >= startDate.Value);
+
+        if (endDate.HasValue)
+            query = query.Where(b => b.Date <= endDate.Value);
+
+        var bookings = await query.ToListAsync();
 
         var confirmedOrCompleted = bookings
             .Where(b => b.Status == "confirmed" || b.Status == "completed")
@@ -32,10 +39,9 @@ public class AdminService : IAdminService
         var activeUsers = bookings.Select(b => b.CustomerEmail).Distinct().Count();
 
         var confirmedBookings = bookings.Count(b => b.Status == "confirmed");
-        
-        // ?? THE FIX: Separate "pending payment" (unpaid) from "payment submitted" (needs review)
-        var pendingPayments = bookings.Count(b => b.Status == "payment_submitted"); 
-        
+
+        var pendingPayments = bookings.Count(b => b.Status == "payment_submitted");
+
         var completedBookings = bookings.Count(b => b.Status == "completed");
         var cancelledBookings = bookings.Count(b => b.Status == "cancelled" || b.Status == "rejected");
 
@@ -89,8 +95,7 @@ public class AdminService : IAdminService
                 .Where(b => b.Status == "confirmed" || b.Status == "completed")
                 .Sum(b => b.TotalAmount);
             var confirmed = bookings.Count(b => b.Status == "confirmed" || b.Status == "completed");
-            
-            // ?? Also fix this to only count payment_submitted
+
             var pending = bookings.Count(b => b.Status == "payment_submitted");
 
             var totalSlots = bookings.Sum(b => b.Slots.Count);

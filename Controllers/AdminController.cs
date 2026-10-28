@@ -90,10 +90,12 @@ public class AdminController : ControllerBase
 
     [HttpGet("analytics")]
     [Authorize(Roles = "admin")]
-    public async Task<ActionResult<AnalyticsDto>> GetAnalytics()
+    public async Task<ActionResult<AnalyticsDto>> GetAnalytics(
+        [FromQuery] DateTime? startDate = null,
+        [FromQuery] DateTime? endDate = null)
     {
         var clientId = await GetClientId();
-        var analytics = await _admin.GetAnalyticsAsync(clientId);
+        var analytics = await _admin.GetAnalyticsAsync(clientId, startDate, endDate);
         return Ok(analytics);
     }
 

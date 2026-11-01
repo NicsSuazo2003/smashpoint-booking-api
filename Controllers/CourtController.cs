@@ -28,13 +28,13 @@ public class CourtController : ControllerBase
     {
         var subdomain = _clientResolver.GetSubdomain();
         if (string.IsNullOrEmpty(subdomain))
-            throw new UnauthorizedAccessException("Client identification required");
+            throw new InvalidOperationException("Client identification required");
 
         return await _clientService.GetClientIdBySubdomainAsync(subdomain);
     }
 
     // ========================================
-    // ? PUBLIC ENDPOINTS
+    // PUBLIC ENDPOINTS
     // ========================================
 
     [HttpGet]
@@ -73,7 +73,7 @@ public class CourtController : ControllerBase
     }
 
     // ========================================
-    // ? ADMIN ENDPOINTS
+    // ADMIN ENDPOINTS
     // ========================================
 
     [Authorize(Roles = "admin")]
@@ -109,7 +109,6 @@ public class CourtController : ControllerBase
     {
         var clientId = await GetClientId();
         var result = await _court.AddBlockedDateAsync(request, id, clientId);
-        // Changed to Ok() to prevent CreatedAtAction routing issues
         return Ok(result);
     }
 
@@ -123,7 +122,7 @@ public class CourtController : ControllerBase
     }
 
     // ========================================
-    // ?? DEPRECATED - Single Court Endpoints
+    // DEPRECATED - Single Court Endpoints
     // ========================================
 
     [HttpGet("legacy")]
@@ -166,7 +165,7 @@ public class CourtController : ControllerBase
     }
 
     // ========================================
-    // ? PRICE RULES ENDPOINTS
+    // PRICE RULES ENDPOINTS
     // ========================================
 
     [HttpGet("price-rules")]

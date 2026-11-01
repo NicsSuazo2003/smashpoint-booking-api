@@ -28,7 +28,7 @@ public class OpenPlayController : ControllerBase
     {
         var subdomain = _clientResolver.GetSubdomain();
         if (string.IsNullOrEmpty(subdomain))
-            throw new UnauthorizedAccessException("Client identification required");
+            throw new InvalidOperationException("Client identification required");
 
         try
         {
@@ -36,7 +36,7 @@ public class OpenPlayController : ControllerBase
         }
         catch (KeyNotFoundException)
         {
-            throw new UnauthorizedAccessException($"Client not found for subdomain: {subdomain}");
+            throw new KeyNotFoundException($"Client not found for subdomain: {subdomain}");
         }
     }
 
@@ -56,10 +56,7 @@ public class OpenPlayController : ControllerBase
         if (session == null) return NotFound(new { message = "Open Play session not found" });
         return Ok(session);
     }
-    /// <summary>
-    /// Public roster for an Open Play session. Returns first-name + last-initial only.
-    /// No authentication required — this is what the public session details modal uses.
-    /// </summary>
+
     [HttpGet("open-play/{id}/players/public")]
     public async Task<ActionResult<List<PublicOpenPlayPlayerDto>>> GetPublicPlayers(Guid id)
     {
@@ -72,8 +69,6 @@ public class OpenPlayController : ControllerBase
         }
         catch (KeyNotFoundException)
         {
-            // Return 404 for both "session not found" and "session ended" so we don't
-            // leak whether a session ever existed to anonymous callers.
             return NotFound(new { message = "Open Play session not found" });
         }
     }

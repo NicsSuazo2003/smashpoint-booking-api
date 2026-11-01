@@ -19,15 +19,17 @@ public class ClientResolver
 
         var list = config.GetSection("Clients:AllowedSubdomains").Get<string[]>()
                    ?? Array.Empty<string>();
-        _allowed = new HashSet<string>(list, StringComparer.OrdinalIgnoreCase);
 
+        // If no allowlist is configured, fall back to the default subdomain so that
+        // a missing or misconfigured appsettings.json does not brick the whole app.
+        var allowedList = list.Length > 0
+            ? list
+            : new[] { config["Clients:DefaultSubdomain"] ?? "smashpoint" };
+
+        _allowed = new HashSet<string>(allowedList, StringComparer.OrdinalIgnoreCase);
         _defaultSubdomain = config["Clients:DefaultSubdomain"];
     }
 
-    /// <summary>
-    /// Returns the subdomain for the current request, validated against the allowlist.
-    /// Returns null when no candidate resolves.
-    /// </summary>
     public string? GetSubdomain()
     {
         var ctx = _httpContextAccessor.HttpContext;
@@ -64,9 +66,6 @@ public class ClientResolver
         return candidate;
     }
 
-    /// <summary>
-    /// Resolves the client's Guid from the subdomain (cached for 1 request + static cache).
-    /// </summary>
     public async Task<Guid?> ResolveClientIdAsync()
     {
         var ctx = _httpContextAccessor.HttpContext;
@@ -97,5 +96,44 @@ public class ClientResolver
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Static helper — reads allowlist from configuration and resolves subdomain
+    /// without needing DI. Same fallback behavior as the instance method.
+    /// </summary>
+    public static string? ResolveSubdomain(HttpContext ctx, IConfiguration config)
+    {
+        var list = config.GetSection("Clients:AllowedSubdomains").Get<string[]>()
+                   ?? Array.Empty<string>();
+        var defaultSub = config["Clients:DefaultSubdomain"];
+
+        var allowedList = list.Length > 0
+            ? list
+            : new[] { defaultSub ?? "smashpoint" };
+        var allowed = new HashSet<string>(allowedList, StringComparer.OrdinalIgnoreCase);
+
+        var fromHeader = ctx.Request.Headers["X-Client-Subdomain"].FirstOrDefault();
+        var candidate = fromHeader;
+
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            var host = ctx.Request.Host.Host;
+            if (!string.IsNullOrEmpty(host))
+            {
+                var parts = host.Split('.');
+                if (parts.Length >= 2 && parts[0] != "www" && parts[0] != "localhost")
+                    candidate = parts[0];
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(candidate))
+            candidate = defaultSub;
+
+        if (string.IsNullOrWhiteSpace(candidate))
+            return null;
+
+        candidate = candidate.Trim().ToLowerInvariant();
+        return allowed.Contains(candidate) ? candidate : null;
     }
 }

@@ -1,7 +1,11 @@
+using System.Net;
 using System.Security.Claims;
 using System.Text;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using SmashPointBookingAPI.Data;
@@ -11,21 +15,24 @@ using SmashPointBookingAPI.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Rebuild configuration FIRST
 builder.Configuration.Sources.Clear();
 builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: false);
 builder.Configuration.AddEnvironmentVariables();
 
-// THEN bind the URL, so it isn't wiped out
 var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
-// Database
+// ─── Database ─────────────────────────────────────────────
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
-// JWT
-var jwtKey = builder.Configuration["Jwt:Key"]!;
+// ─── JWT ──────────────────────────────────────────────────
+var jwtKey = builder.Configuration["Jwt:Key"]
+    ?? throw new InvalidOperationException("Jwt:Key must be configured (use env var, never commit it).");
+
+if (jwtKey.Length < 32)
+    throw new InvalidOperationException("Jwt:Key must be at least 32 characters.");
+
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
@@ -35,6 +42,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateAudience = true,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
+            ClockSkew = TimeSpan.FromSeconds(30),
             ValidIssuer = builder.Configuration["Jwt:Issuer"],
             ValidAudience = builder.Configuration["Jwt:Audience"],
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)),
@@ -44,9 +52,223 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 
 builder.Services.AddAuthorization();
-builder.Services.AddHttpClient();
-builder.Services.AddSingleton<EmailService>();
+builder.Services.AddHttpContextAccessor();
 
+// ─── ForwardedHeaders (protocol only — IP handled below) ──
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedProto;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
+
+static bool IsNonPublic(IPAddress ip)
+{
+    if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+    if (IPAddress.IsLoopback(ip)) return true;
+
+    if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+        return ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal || (ip.GetAddressBytes()[0] & 0xFE) == 0xFC;
+
+    var b = ip.GetAddressBytes();
+    return b[0] == 0
+        || b[0] == 10
+        || (b[0] == 172 && b[1] is >= 16 and <= 31)
+        || (b[0] == 192 && b[1] == 168)
+        || (b[0] == 169 && b[1] == 254)
+        || (b[0] == 100 && b[1] is >= 64 and <= 127);
+}
+
+// Real visitor IP: CF-Connecting-IP > True-Client-IP > rightmost-public of XFF.
+static IPAddress? ResolveClientIp(HttpContext ctx)
+{
+    foreach (var name in new[] { "CF-Connecting-IP", "True-Client-IP" })
+    {
+        var v = ctx.Request.Headers[name].FirstOrDefault()?.Trim();
+        if (v is not null && IPAddress.TryParse(v, out var ip) && !IsNonPublic(ip))
+            return ip;
+    }
+
+    var xff = ctx.Request.Headers["X-Forwarded-For"].ToString();
+    if (!string.IsNullOrWhiteSpace(xff))
+    {
+        var parts = xff.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (int i = parts.Length - 1; i >= 0; i--)
+        {
+            if (IPAddress.TryParse(parts[i], out var ip) && !IsNonPublic(ip))
+                return ip;
+        }
+    }
+
+    return null;
+}
+
+// ─── Rate-limit rejection log gate ───
+var rejectionLogGate = new System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>();
+
+static bool ShouldLogRejection(
+    System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> gate,
+    string key,
+    TimeSpan window)
+{
+    if (gate.Count > 10_000) gate.Clear();
+
+    var now = DateTime.UtcNow;
+    while (true)
+    {
+        if (!gate.TryGetValue(key, out var last))
+        {
+            if (gate.TryAdd(key, now)) return true;
+            continue;
+        }
+        if (now - last < window) return false;
+        if (gate.TryUpdate(key, now, last)) return true;
+    }
+}
+
+builder.Services.AddHttpClient();
+
+// ─── Rate Limiter ─────────────────────────────────────────
+builder.Services.AddRateLimiter(options =>
+{
+    static string ClientIp(HttpContext ctx) =>
+        ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
+    {
+        var route = ctx.Request.Path.Value ?? "/";
+        var prefix =
+            route.StartsWith("/api/bookings", StringComparison.Ordinal) ? "bookings" :
+            route.StartsWith("/api/open-play", StringComparison.Ordinal) ? "openplay" :
+            route.StartsWith("/api/auth", StringComparison.Ordinal) ? "auth" :
+            route.StartsWith("/api/courts", StringComparison.Ordinal) ? "courts" :
+            route.StartsWith("/api/clients", StringComparison.Ordinal) ? "clients" :
+            "other";
+
+        return RateLimitPartition.GetSlidingWindowLimiter(
+            partitionKey: $"{prefix}:{ClientIp(ctx)}",
+            factory: _ => new SlidingWindowRateLimiterOptions
+            {
+                PermitLimit = prefix switch
+                {
+                    "bookings" => 60,
+                    "openplay" => 60,
+                    "auth" => 20,
+                    "courts" => 120,
+                    "clients" => 120,
+                    _ => 120,
+                },
+                Window = TimeSpan.FromMinutes(1),
+                SegmentsPerWindow = 6,
+                QueueLimit = 0,
+            });
+    });
+
+    options.AddPolicy("booking", ctx =>
+        RateLimitPartition.GetSlidingWindowLimiter(
+            partitionKey: $"booking-create:{ClientIp(ctx)}",
+            factory: _ => new SlidingWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(10),
+                SegmentsPerWindow = 10,
+                QueueLimit = 0,
+            }));
+
+    options.AddPolicy("auth", ctx =>
+        RateLimitPartition.GetSlidingWindowLimiter(
+            partitionKey: $"auth:{ClientIp(ctx)}",
+            factory: _ => new SlidingWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(15),
+                SegmentsPerWindow = 15,
+                QueueLimit = 0,
+            }));
+
+    options.AddPolicy("track", ctx =>
+        RateLimitPartition.GetSlidingWindowLimiter(
+            partitionKey: $"track:{ClientIp(ctx)}",
+            factory: _ => new SlidingWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(10),
+                SegmentsPerWindow = 10,
+                QueueLimit = 0,
+            }));
+
+    options.AddPolicy("upload", ctx =>
+        RateLimitPartition.GetSlidingWindowLimiter(
+            partitionKey: $"upload:{ClientIp(ctx)}",
+            factory: _ => new SlidingWindowRateLimiterOptions
+            {
+                PermitLimit = 3,
+                Window = TimeSpan.FromHours(1),
+                SegmentsPerWindow = 12,
+                QueueLimit = 0,
+            }));
+
+    options.AddPolicy("join", ctx =>
+        RateLimitPartition.GetSlidingWindowLimiter(
+            partitionKey: $"join:{ClientIp(ctx)}",
+            factory: _ => new SlidingWindowRateLimiterOptions
+            {
+                PermitLimit = 5,
+                Window = TimeSpan.FromHours(1),
+                SegmentsPerWindow = 12,
+                QueueLimit = 0,
+            }));
+
+    options.OnRejected = async (ctx, token) =>
+    {
+        var http = ctx.HttpContext;
+
+        try
+        {
+            var ip = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+            // Sampled: at most one DB row per IP per 5 minutes
+            if (http.Items["ClientId"] is Guid cid &&
+                ShouldLogRejection(rejectionLogGate, ip, TimeSpan.FromMinutes(5)))
+            {
+                var secLogger = http.RequestServices.GetService<ISecurityLogger>();
+                if (secLogger is not null)
+                {
+                    var ua = http.Request.Headers["User-Agent"].FirstOrDefault();
+
+                    await secLogger.LogAsync(new SecurityEvent
+                    {
+                        ClientId = cid,
+                        IpHash = secLogger.HashIp(ip),
+                        IpAddress = ip == "unknown" ? null : ip,
+                        UserAgent = ua,
+                        EventType = "rate_limit.triggered",
+                        Severity = "warning",
+                        Message = $"Rate limit hit on {http.Request.Method} {http.Request.Path} (sampled: 1 per 5 min per IP)",
+                        Metadata = new
+                        {
+                            path = http.Request.Path.Value,
+                            method = http.Request.Method,
+                        },
+                        Success = false,
+                        ErrorCode = "429",
+                    });
+                }
+            }
+        }
+        catch { }
+
+        http.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        http.Response.Headers.RetryAfter = "60";
+        http.Response.ContentType = "application/json";
+        await http.Response.WriteAsync(
+            """{"message":"Too many requests. Please slow down and try again shortly."}""",
+            token);
+    };
+});
+
+// ─── Services ────────────────────────────────────────────
+builder.Services.AddSingleton<EmailService>();
 builder.Services.AddScoped<TokenService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<ICourtService, CourtService>();
@@ -55,99 +277,92 @@ builder.Services.AddScoped<IPaymentService, PaymentService>();
 builder.Services.AddScoped<IAdminService, AdminService>();
 builder.Services.AddScoped<IOpenPlayService, OpenPlayService>();
 builder.Services.AddScoped<IPricingRuleService, PricingRuleService>();
+builder.Services.AddScoped<IClientService, ClientService>();
+
+builder.Services.AddScoped<ISecurityLogger, SecurityLogger>();
+builder.Services.AddHostedService<ExpiredBookingWorker>();
+builder.Services.AddHostedService<SecurityRetentionWorker>();
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddHttpContextAccessor();
-builder.Services.AddScoped<ClientResolver>();
-builder.Services.AddScoped<IClientService, ClientService>();
-builder.Services.AddHostedService<ExpiredBookingWorker>();
-
-// Security
-builder.Services.AddScoped<ISecurityLogger, SecurityLogger>();
-builder.Services.AddHostedService<SecurityRetentionWorker>();
-
-// Health Checks
 builder.Services.AddHealthChecks();
-
 builder.Services.AddSwaggerGen();
 
-// ─── CORS ─────────────────────────────────────────────────────────
-// ✅ UPDATED: Added the new Vercel URL (smashpointpicklecenter.vercel.app)
+// ─── CORS ────────────────────────────────────────────────
 var corsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
-    ?? new[] {
+    ?? new[]
+    {
         "http://localhost:5173",
         "http://localhost:3000",
-        "https://smashpoint-seven.vercel.app",
-        "https://smashpointpicklecenter.vercel.app"  // 👈 NEW URL
+        "https://smashpoint-booking.vercel.app",
+        "https://smashpoint.vercel.app",
     };
-
-// Ensure the new URL is always allowed, even if the env var overrides it
-var finalCorsOrigins = corsOrigins.ToList();
-if (!finalCorsOrigins.Contains("https://smashpointpicklecenter.vercel.app"))
-{
-    finalCorsOrigins.Add("https://smashpointpicklecenter.vercel.app");
-}
 
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("Frontend", policy =>
-        policy.WithOrigins(finalCorsOrigins.ToArray())
-            .AllowAnyHeader()
-            .AllowAnyMethod()
-            .AllowCredentials());
+        policy.WithOrigins(corsOrigins)
+              .AllowAnyHeader()
+              .AllowAnyMethod()
+              .AllowCredentials());
 });
 
 var app = builder.Build();
 
-// ─────────────────────────────────────────────────────────────────
-// Background startup tasks — runs after Kestrel binds the port
-// ─────────────────────────────────────────────────────────────────
+// ─── Startup task ─────────────────────────────────────────
 _ = Task.Run(async () =>
 {
     await Task.Delay(TimeSpan.FromSeconds(5));
-
     try
     {
         using var scope = app.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
 
-        DbSeeder.Initialize(db);
+        try { DbSeeder.Initialize(db); }
+        catch (Exception ex) { logger.LogError(ex, "Seeding failed; app will start with empty DB."); }
 
-        var clientService = scope.ServiceProvider.GetRequiredService<IClientService>();
-        Guid clientId;
-        try
+        var clientIds = await db.Clients.Select(c => c.Id).ToListAsync();
+        var bookingService = scope.ServiceProvider.GetRequiredService<IBookingService>();
+        foreach (var cid in clientIds)
         {
-            clientId = await clientService.GetClientIdBySubdomainAsync("smashpoint");
-        }
-        catch
-        {
-            var firstClient = await db.Clients.FirstOrDefaultAsync();
-            clientId = firstClient?.Id ?? Guid.Empty;
-        }
-
-        if (clientId != Guid.Empty)
-        {
-            var bookingService = scope.ServiceProvider.GetRequiredService<IBookingService>();
-
-            await bookingService.AutoCompletePastBookingsAsync(clientId);
-            await bookingService.CancelExpiredPaymentsAsync(clientId);
+            try
+            {
+                await bookingService.AutoCompletePastBookingsAsync(cid);
+                await bookingService.CancelExpiredPaymentsAsync(cid);
+            }
+            catch { }
         }
     }
-    catch
-    {
-        // Don't crash the app if background startup work fails.
-    }
+    catch { }
 });
 
-// 👇 NEW: Security Headers Middleware
+// ─── Pipeline ────────────────────────────────────────────
+
+// Protocol (http/https) from X-Forwarded-Proto
+app.UseForwardedHeaders();
+
+// Rewrites RemoteIpAddress to the real visitor IP BEFORE ClientResolver,
+// RateLimiter, controllers and SecurityLogger read it.
+app.Use(async (ctx, next) =>
+{
+    var real = ResolveClientIp(ctx);
+    if (real is not null) ctx.Connection.RemoteIpAddress = real;
+    await next();
+});
+
 app.UseMiddleware<SecurityHeadersMiddleware>();
-
 app.UseMiddleware<ExceptionMiddleware>();
-app.UseCors("Frontend");
 
-app.UseSwagger();
-app.UseSwaggerUI();
+app.UseCors("Frontend");
+app.UseRateLimiter();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
 app.UseStaticFiles();
 app.UseAuthentication();
 app.UseAuthorization();

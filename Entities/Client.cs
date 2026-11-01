@@ -17,7 +17,6 @@ public class Client
     [Column(TypeName = "jsonb")]
     public string? PaymentMethods { get; set; }
 
-    // ⭐ JSONB column. Stores [{ name, icon, description }, ...]
     [Column(TypeName = "jsonb")]
     public string? AvailableAmenitiesJson { get; set; }
 
@@ -31,14 +30,34 @@ public class Client
         set => AvailableAmenitiesJson = JsonSerializer.Serialize(value);
     }
 
-    // ⭐ NEW — Maximum days ahead a customer can book.
-    // 0 = no limit. Default = 90 days (~3 months).
     public int MaxAdvanceBookingDays { get; set; } = 90;
 
-    // ⭐ NEW — Master switch for customer-facing online bookings.
-    // Staff manual bookings (CreateStaffBookingAsync) are unaffected.
     [Column("bookings_enabled")]
     public bool BookingsEnabled { get; set; } = true;
+
+    // ── Booking window mode ──
+    // "rolling" → MaxAdvanceBookingDays controls the far edge
+    // "fixed"   → [BookingOpenDate .. BookingCloseDate] inclusive
+    // "closed"  → no customer-facing bookings (staff unaffected)
+    public string BookingWindowMode { get; set; } = "rolling";
+
+    private DateTime? _bookingOpenDate;
+    public DateTime? BookingOpenDate
+    {
+        get => _bookingOpenDate;
+        set => _bookingOpenDate = value.HasValue
+            ? DateTime.SpecifyKind(value.Value.Date, DateTimeKind.Utc)
+            : null;
+    }
+
+    private DateTime? _bookingCloseDate;
+    public DateTime? BookingCloseDate
+    {
+        get => _bookingCloseDate;
+        set => _bookingCloseDate = value.HasValue
+            ? DateTime.SpecifyKind(value.Value.Date, DateTimeKind.Utc)
+            : null;
+    }
 
     private DateTime _createdAt;
     public DateTime CreatedAt
@@ -53,10 +72,9 @@ public class Client
     public ICollection<Booking> Bookings { get; set; } = new List<Booking>();
 }
 
-// Nested amenity shape (stored in AvailableAmenitiesJson)
 public class AmenityItem
 {
     public string Name { get; set; } = string.Empty;
-    public string Icon { get; set; } = "Sparkles";  // Lucide icon key
-    public string? Description { get; set; }        // Landing-only subtitle
+    public string Icon { get; set; } = "Sparkles";
+    public string? Description { get; set; }
 }

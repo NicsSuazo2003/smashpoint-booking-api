@@ -23,16 +23,14 @@ public class AppDbContext : DbContext
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        // Configure DateTime to use UTC
         ConfigureDateTimeUtc(modelBuilder);
 
-        // Table names genuinely all-lowercase in Supabase
         foreach (var entity in modelBuilder.Model.GetEntityTypes())
         {
             entity.SetTableName(entity.GetTableName()!.ToLower());
         }
 
-        // ── User configuration ──
+        // ── User ──
         modelBuilder.Entity<User>(e =>
         {
             e.HasIndex(u => u.Email).IsUnique();
@@ -44,7 +42,7 @@ public class AppDbContext : DbContext
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
-        // ── Client entity ──
+        // ── Client ──
         modelBuilder.Entity<Client>(e =>
         {
             e.Property(c => c.Id).HasColumnName("id");
@@ -67,6 +65,18 @@ public class AppDbContext : DbContext
                 .HasColumnName("max_advance_booking_days")
                 .HasDefaultValue(90);
 
+            e.Property(c => c.BookingWindowMode)
+                .HasColumnName("booking_window_mode")
+                .HasDefaultValue("rolling");
+
+            e.Property(c => c.BookingOpenDate)
+                .HasColumnName("booking_open_date")
+                .HasColumnType("date");
+
+            e.Property(c => c.BookingCloseDate)
+                .HasColumnName("booking_close_date")
+                .HasColumnType("date");
+
             e.Property(c => c.CreatedAt).HasColumnName("created_at");
             e.Property(c => c.Status).HasColumnName("status");
 
@@ -86,9 +96,9 @@ public class AppDbContext : DbContext
         {
             e.HasIndex(r => r.CourtId);
             e.HasOne(r => r.Court)
-             .WithMany(c => c.PricingRules)
-             .HasForeignKey(r => r.CourtId)
-             .OnDelete(DeleteBehavior.Cascade);
+                .WithMany(c => c.PricingRules)
+                .HasForeignKey(r => r.CourtId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         // ── Court ──
@@ -147,8 +157,9 @@ public class AppDbContext : DbContext
                 .HasForeignKey(b => b.OpenPlaySessionId)
                 .OnDelete(DeleteBehavior.SetNull);
 
-            e.Property(b => b.Date)
-                .HasConversion(new DateTimeToUtcConverter());
+            e.Property(b => b.Date).HasConversion(new DateTimeToUtcConverter());
+
+            e.HasIndex(b => b.ReferenceCode).IsUnique();
         });
 
         // ── TimeSlot ──
@@ -164,16 +175,18 @@ public class AppDbContext : DbContext
                 .HasForeignKey(ts => ts.CourtId)
                 .OnDelete(DeleteBehavior.SetNull);
 
-            e.Property(ts => ts.Date)
-                .HasConversion(new DateTimeToUtcConverter());
+            e.Property(ts => ts.Date).HasConversion(new DateTimeToUtcConverter());
+
+            e.HasIndex(ts => new { ts.CourtId, ts.Date, ts.StartTime })
+                .IsUnique()
+                .HasFilter("\"CourtId\" IS NOT NULL");
         });
 
-        // ── BlockedDate (FIXED) ──
+        // ── BlockedDate ──
         modelBuilder.Entity<BlockedDate>(e =>
         {
             e.Property(bd => bd.ClientId).HasColumnName("client_id");
 
-            // 👇 This ensures EF Core maps the nullable Client relationship correctly
             e.HasOne(bd => bd.Client)
                 .WithMany()
                 .HasForeignKey(bd => bd.ClientId)
@@ -184,8 +197,7 @@ public class AppDbContext : DbContext
                 .HasForeignKey(bd => bd.CourtId)
                 .OnDelete(DeleteBehavior.SetNull);
 
-            e.Property(bd => bd.Date)
-                .HasConversion(new DateTimeToUtcConverter());
+            e.Property(bd => bd.Date).HasConversion(new DateTimeToUtcConverter());
         });
 
         // ── PriceRule ──
@@ -242,8 +254,7 @@ public class AppDbContext : DbContext
                 .HasForeignKey(sc => sc.OpenPlaySessionId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            e.Property(s => s.Date)
-                .HasConversion(new DateTimeToUtcConverter());
+            e.Property(s => s.Date).HasConversion(new DateTimeToUtcConverter());
         });
 
         // ── OpenPlaySessionCourt ──
@@ -259,6 +270,19 @@ public class AppDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(sc => sc.CourtId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ── SecurityEvent ──
+        modelBuilder.Entity<SecurityEventEntity>(e =>
+        {
+            e.ToTable("security_events");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Metadata).HasColumnType("jsonb");
+            e.Property(x => x.IpAddress).HasColumnType("inet");
+            e.HasIndex(x => new { x.ClientId, x.OccurredAt })
+                .HasDatabaseName("ix_secevents_client_time");
+            e.HasIndex(x => new { x.ClientId, x.EventType, x.OccurredAt })
+                .HasDatabaseName("ix_secevents_type_time");
         });
     }
 
@@ -277,7 +301,6 @@ public class AppDbContext : DbContext
     }
 }
 
-// Converts DateTime to always be UTC on save and read
 public class DateTimeToUtcConverter : ValueConverter<DateTime, DateTime>
 {
     public DateTimeToUtcConverter()

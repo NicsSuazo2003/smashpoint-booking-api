@@ -604,7 +604,7 @@ public class BookingService : IBookingService
     }
 
     public async Task<RescheduleBookingResponse> RescheduleBookingAsync(
-        Guid id, RescheduleBookingRequest request, Guid clientId)
+     Guid id, RescheduleBookingRequest request, Guid clientId)
     {
         if (request.Slots == null || !request.Slots.Any())
             throw new InvalidOperationException("At least one time slot is required");
@@ -668,7 +668,6 @@ public class BookingService : IBookingService
 
         foreach (var (start, end) in ordered)
         {
-            // ✅ FIX — exclude only the booking being rescheduled
             var conflicting = await HasTimeslotConflictAsync(
                 targetCourtId, targetDate, start, end, excludeBookingId: booking.Id);
 
@@ -703,14 +702,10 @@ public class BookingService : IBookingService
         var previousSlots = booking.Slots
             .OrderBy(s => s.StartTime)
             .Select(s => new TimeSlotDto(
-                s.Id.ToString(),
-                s.CourtId.ToString(),
-                previousCourtName,
+                s.Id.ToString(), s.CourtId.ToString(), previousCourtName,
                 s.Date.ToString("yyyy-MM-dd"),
-                s.StartTime.ToString("HH:mm"),
-                s.EndTime.ToString("HH:mm"),
-                false,
-                s.Price))
+                s.StartTime.ToString("HH:mm"), s.EndTime.ToString("HH:mm"),
+                false, s.Price))
             .ToList();
 
         var dateOnly = DateOnly.FromDateTime(targetDate);
@@ -725,6 +720,11 @@ public class BookingService : IBookingService
             perSlotPrices.Add(price);
             newTotal += price;
         }
+
+        // ✅ Reload slots from DB before removing — they may have been
+        // deleted by cleanup or the FreeSlotsIfTerminal code, which would
+        // otherwise cause "expected 1 row, affected 0" concurrency exceptions.
+        await _db.Entry(booking).Collection(b => b.Slots).LoadAsync();
 
         _db.TimeSlots.RemoveRange(booking.Slots);
 
@@ -748,7 +748,7 @@ public class BookingService : IBookingService
         var changeSummary =
             $"[RESCHEDULED {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC] " +
             $"{previousDate:yyyy-MM-dd} {previousCourtName} " +
-            $"? {targetDate:yyyy-MM-dd} {targetCourt.Name}" +
+            $"→ {targetDate:yyyy-MM-dd} {targetCourt.Name}" +
             (string.IsNullOrWhiteSpace(request.Reason) ? "" : $" · Reason: {request.Reason}") +
             (string.IsNullOrWhiteSpace(request.StaffNotes) ? "" : $" · Staff: {request.StaffNotes}");
 
@@ -769,7 +769,7 @@ public class BookingService : IBookingService
                     targetDate.ToString("yyyy-MM-dd"),
                     string.Join(", ", ordered.Select(s => $"{s.Start:HH\\:mm}-{s.End:HH\\:mm}")),
                     targetCourt.Name,
-                    $"?{newTotal:N2}",
+                    $"₱{newTotal:N2}",
                     request.Reason);
             }
             catch { }
@@ -777,17 +777,10 @@ public class BookingService : IBookingService
 
         var delta = newTotal - previousAmount;
         return new RescheduleBookingResponse(
-            MapToDto(booking, targetCourt.Name),
-            previousSlots,
-            previousDate.ToString("yyyy-MM-dd"),
-            previousCourtId.ToString(),
-            previousCourtName,
-            previousAmount,
-            newTotal,
-            delta > 0 ? delta : 0m,
-            delta < 0 ? -delta : 0m);
+            MapToDto(booking, targetCourt.Name), previousSlots,
+            previousDate.ToString("yyyy-MM-dd"), previousCourtId.ToString(), previousCourtName,
+            previousAmount, newTotal, delta > 0 ? delta : 0m, delta < 0 ? -delta : 0m);
     }
-
     public async Task<List<BookingSummaryDto>> TrackBookingSummariesByEmailAsync(string email, Guid clientId)
     {
         if (string.IsNullOrWhiteSpace(email))

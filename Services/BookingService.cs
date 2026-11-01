@@ -35,10 +35,33 @@ public class BookingService : IBookingService
         }
     }
 
+    // ✅ NEW — helper: does any timeslot (regardless of owner booking's status) overlap?
+    private async Task<bool> HasTimeslotConflictAsync(
+        Guid courtId, DateTime date, TimeOnly start, TimeOnly end, Guid? excludeBookingId = null)
+    {
+        var q = _db.TimeSlots
+            .Where(s => s.CourtId == courtId
+                     && s.Date == date
+                     && s.StartTime < end
+                     && s.EndTime > start);
+
+        if (excludeBookingId.HasValue)
+            q = q.Where(s => s.BookingId != excludeBookingId.Value);
+
+        return await q.AnyAsync();
+    }
+
+    // ✅ NEW — helper: free a booking's timeslots when it moves to a terminal status
+    private void FreeSlotsIfTerminal(string newStatus, Booking booking)
+    {
+        if (newStatus is "cancelled" or "rejected" or "expired" or "refunded")
+        {
+            _db.TimeSlots.RemoveRange(booking.Slots);
+        }
+    }
+
     public async Task<BookingDto> CreateBookingAsync(CreateBookingRequest request, Guid clientId)
     {
-        // ⭐ NEW — reject customer bookings when the toggle is OFF.
-        // Staff manual bookings use CreateStaffBookingAsync and are unaffected.
         if (!request.AdminOverride)
         {
             var bookingClient = await _db.Clients.FindAsync(clientId)
@@ -84,16 +107,12 @@ public class BookingService : IBookingService
                     if (!TimeOnly.TryParse(slot.EndTime, out var endTime))
                         throw new InvalidOperationException($"Invalid end time: {slot.EndTime}");
 
-                    var conflicting = await _db.TimeSlots
-                        .Where(s => s.CourtId == courtGuid
-                                 && s.Date == bookingDate
-                                 && s.StartTime < endTime
-                                 && s.EndTime > startTime
-                                 && s.Booking.Status != "cancelled"
-                                 && s.Booking.Status != "expired"
-                                 && s.Booking.Status != "rejected"
-                                 && s.Booking.Status != "refunded")
-                        .AnyAsync();
+                    // ✅ FIX — conflict check queries TimeSlots directly, ignoring
+                    // the owning booking's status. An "expired" booking still
+                    // physically owns its timeslot rows and would otherwise
+                    // trigger a unique-index 500 on insert.
+                    var conflicting = await HasTimeslotConflictAsync(
+                        courtGuid, bookingDate, startTime, endTime);
 
                     if (conflicting)
                         throw new InvalidOperationException(
@@ -119,8 +138,7 @@ public class BookingService : IBookingService
             }
 
             var referenceCode = $"BK-{DateTime.UtcNow:yyyyMMdd}-{Random.Shared.Next(1000, 9999)}";
-            var primaryCourtId = (Guid)newSlots.First().CourtId;
-
+            var primaryCourtId = newSlots.First().CourtId;
 
             var booking = new Booking
             {
@@ -175,12 +193,12 @@ public class BookingService : IBookingService
                     }));
 
                 await _email.NotifyAdminNewBookingAsync(
-                        booking.CustomerName,
-                        booking.ReferenceCode,
-                        booking.Date.ToString("yyyy-MM-dd"),
-                        slotsText,
-                        $"?{booking.TotalAmount:N2}"
-                    );
+                    booking.CustomerName,
+                    booking.ReferenceCode,
+                    booking.Date.ToString("yyyy-MM-dd"),
+                    slotsText,
+                    $"?{booking.TotalAmount:N2}"
+                );
             }
             catch { }
 
@@ -197,113 +215,99 @@ public class BookingService : IBookingService
     public async Task<BookingDto> GetBookingAsync(Guid id, Guid clientId)
     {
         var booking = await _db.Bookings
-            .Include(b => b.Slots)
-            .Include(b => b.Court)
+            .Include(b => b.Slots).Include(b => b.Court)
             .FirstOrDefaultAsync(b => b.Id == id && b.ClientId == clientId)
             ?? throw new KeyNotFoundException("Booking not found");
-
         return MapToDto(booking, booking.Court?.Name ?? "");
     }
 
     public async Task<BookingDto> GetBookingByReferenceAsync(string referenceCode, Guid clientId)
     {
         var booking = await _db.Bookings
-            .Include(b => b.Slots)
-            .Include(b => b.Court)
+            .Include(b => b.Slots).Include(b => b.Court)
             .FirstOrDefaultAsync(b => b.ReferenceCode == referenceCode && b.ClientId == clientId)
             ?? throw new KeyNotFoundException("Booking not found");
-
         return MapToDto(booking, booking.Court?.Name ?? "");
     }
 
     public async Task<BookingDto> TrackBookingAsync(string referenceCode, string? email, Guid clientId)
     {
         var query = _db.Bookings
-            .Include(b => b.Slots)
-            .Include(b => b.Court)
+            .Include(b => b.Slots).Include(b => b.Court)
             .Where(b => b.ReferenceCode == referenceCode && b.ClientId == clientId);
 
         if (!string.IsNullOrEmpty(email))
-        {
             query = query.Where(b => b.CustomerEmail == email);
-        }
 
         var booking = await query.FirstOrDefaultAsync()
             ?? throw new KeyNotFoundException("Booking not found");
-
         return MapToDto(booking, booking.Court?.Name ?? "");
     }
 
     public async Task<List<BookingDto>> GetBookingsAsync(Guid clientId, DateTime? fromDate = null, DateTime? toDate = null)
     {
-        var query = _db.Bookings
-            .Include(b => b.Slots)
-            .Include(b => b.Court)
+        var query = _db.Bookings.Include(b => b.Slots).Include(b => b.Court)
             .Where(b => b.ClientId == clientId);
 
-        if (fromDate.HasValue)
-            query = query.Where(b => b.Date >= fromDate.Value);
-        if (toDate.HasValue)
-            query = query.Where(b => b.Date <= toDate.Value);
+        if (fromDate.HasValue) query = query.Where(b => b.Date >= fromDate.Value);
+        if (toDate.HasValue) query = query.Where(b => b.Date <= toDate.Value);
 
-        var bookings = await query
-            .OrderByDescending(b => b.CreatedAt)
-            .ToListAsync();
-
+        var bookings = await query.OrderByDescending(b => b.CreatedAt).ToListAsync();
         return bookings.Select(b => MapToDto(b, b.Court?.Name ?? "")).ToList();
     }
 
     public async Task<List<BookingDto>> GetAllBookingsAsync(Guid clientId)
     {
         var bookings = await _db.Bookings
-            .Include(b => b.Slots)
-            .Include(b => b.Court)
+            .Include(b => b.Slots).Include(b => b.Court)
             .Where(b => b.ClientId == clientId)
             .OrderByDescending(b => b.CreatedAt)
             .ToListAsync();
-
         return bookings.Select(b => MapToDto(b, b.Court?.Name ?? "")).ToList();
     }
 
     public async Task<BookingDto> UpdateBookingStatusAsync(Guid id, string status, Guid clientId)
     {
         var booking = await _db.Bookings
-            .Include(b => b.Slots)
-            .Include(b => b.Court)
+            .Include(b => b.Slots).Include(b => b.Court)
             .FirstOrDefaultAsync(b => b.Id == id && b.ClientId == clientId)
             ?? throw new KeyNotFoundException("Booking not found");
 
         var previousStatus = booking.Status;
         booking.Status = status;
+
+        // ✅ FIX — free timeslots when terminating so the slot is bookable again
+        if (previousStatus != status)
+            FreeSlotsIfTerminal(status, booking);
+
         await _db.SaveChangesAsync();
-
         await SendStatusChangeEmailAsync(booking, previousStatus);
-
         return MapToDto(booking, booking.Court?.Name ?? "");
     }
 
     public async Task<BookingDto> AdminUpdateBookingAsync(Guid id, AdminUpdateBookingRequest request, Guid clientId)
     {
         var booking = await _db.Bookings
-            .Include(b => b.Slots)
-            .Include(b => b.Court)
+            .Include(b => b.Slots).Include(b => b.Court)
             .FirstOrDefaultAsync(b => b.Id == id && b.ClientId == clientId)
             ?? throw new KeyNotFoundException("Booking not found");
 
         var previousStatus = booking.Status;
         booking.Status = request.Status;
+
+        // ✅ FIX — free timeslots when terminating
+        if (previousStatus != request.Status)
+            FreeSlotsIfTerminal(request.Status, booking);
+
         await _db.SaveChangesAsync();
-
         await SendStatusChangeEmailAsync(booking, previousStatus);
-
         return MapToDto(booking, booking.Court?.Name ?? "");
     }
 
     public async Task<BookingDto> UploadPaymentAsync(Guid id, string screenshotBase64, string? paymentReference, Guid clientId)
     {
         var booking = await _db.Bookings
-            .Include(b => b.Slots)
-            .Include(b => b.Court)
+            .Include(b => b.Slots).Include(b => b.Court)
             .FirstOrDefaultAsync(b => b.Id == id && b.ClientId == clientId)
             ?? throw new KeyNotFoundException("Booking not found");
 
@@ -314,20 +318,14 @@ public class BookingService : IBookingService
         booking.PaymentReference = paymentReference;
         booking.Status = "payment_submitted";
         await _db.SaveChangesAsync();
-
         return MapToDto(booking, booking.Court?.Name ?? "");
     }
 
     public async Task<BookingDto> UploadPaymentScreenshotAsync(
-     Guid id,
-     string? screenshotUrl,
-     string? paymentReference,
-     string? paymentMethod,
-     Guid clientId)
+        Guid id, string? screenshotUrl, string? paymentReference, string? paymentMethod, Guid clientId)
     {
         var booking = await _db.Bookings
-            .Include(b => b.Slots)
-            .Include(b => b.Court)
+            .Include(b => b.Slots).Include(b => b.Court)
             .FirstOrDefaultAsync(b => b.Id == id && b.ClientId == clientId)
             ?? throw new KeyNotFoundException("Booking not found");
 
@@ -344,31 +342,31 @@ public class BookingService : IBookingService
 
         booking.Status = "payment_submitted";
         await _db.SaveChangesAsync();
-
         return MapToDto(booking, booking.Court?.Name ?? "");
     }
 
     public async Task ConfirmPaymentAsync(Guid id, Guid clientId)
     {
-        var booking = await _db.Bookings
-            .Include(b => b.Slots)
+        var booking = await _db.Bookings.Include(b => b.Slots)
             .FirstOrDefaultAsync(b => b.Id == id && b.ClientId == clientId)
             ?? throw new KeyNotFoundException("Booking not found");
 
         var previousStatus = booking.Status;
         booking.Status = "confirmed";
         await _db.SaveChangesAsync();
-
         await SendStatusChangeEmailAsync(booking, previousStatus);
     }
 
     public async Task CancelBookingAsync(Guid id, Guid clientId)
     {
         var booking = await _db.Bookings
+            .Include(b => b.Slots)
             .FirstOrDefaultAsync(b => b.Id == id && b.ClientId == clientId)
             ?? throw new KeyNotFoundException("Booking not found");
 
         booking.Status = "cancelled";
+        // ✅ FIX — free timeslots on cancel
+        FreeSlotsIfTerminal("cancelled", booking);
         await _db.SaveChangesAsync();
     }
 
@@ -384,17 +382,15 @@ public class BookingService : IBookingService
                 && b.Status != "expired")
             .ToListAsync();
 
-        foreach (var booking in pastBookings)
-        {
-            booking.Status = "completed";
-        }
-
+        foreach (var booking in pastBookings) booking.Status = "completed";
         await _db.SaveChangesAsync();
     }
 
     public async Task CancelExpiredPaymentsAsync(Guid clientId)
     {
+        // ✅ FIX — Include Slots so we can free them when the booking expires
         var expiredBookings = await _db.Bookings
+            .Include(b => b.Slots)
             .Where(b => b.ClientId == clientId
                 && b.Status == "pending_payment"
                 && b.PaymentExpiresAt != null
@@ -404,15 +400,16 @@ public class BookingService : IBookingService
         foreach (var booking in expiredBookings)
         {
             booking.Status = "expired";
+            // ✅ FIX — free timeslots so the hour becomes bookable again
+            if (booking.Slots.Count > 0)
+                _db.TimeSlots.RemoveRange(booking.Slots);
         }
-
         await _db.SaveChangesAsync();
     }
 
     private async Task SendStatusChangeEmailAsync(Booking booking, string previousStatus)
     {
-        if (previousStatus == booking.Status)
-            return;
+        if (previousStatus == booking.Status) return;
 
         var timeRange = string.Join(", ", booking.Slots
             .OrderBy(s => s.StartTime)
@@ -423,62 +420,23 @@ public class BookingService : IBookingService
         try
         {
             if (booking.Status == "confirmed")
-            {
                 await _email.NotifyCustomerBookingConfirmedAsync(
-                    booking.CustomerEmail,
-                    booking.CustomerName,
-                    booking.ReferenceCode,
-                    dateStr,
-                    timeRange,
-                    amountStr
-                );
-            }
+                    booking.CustomerEmail, booking.CustomerName, booking.ReferenceCode, dateStr, timeRange, amountStr);
             else if (booking.Status == "rejected")
-            {
                 await _email.NotifyCustomerBookingRejectedAsync(
-                    booking.CustomerEmail,
-                    booking.CustomerName,
-                    booking.ReferenceCode,
-                    dateStr,
-                    timeRange,
-                    null,
-                    amountStr
-                );
-            }
+                    booking.CustomerEmail, booking.CustomerName, booking.ReferenceCode, dateStr, timeRange, null, amountStr);
             else if (booking.Status == "cancelled")
-            {
                 await _email.NotifyCustomerBookingCancelledAsync(
-                    booking.CustomerEmail,
-                    booking.CustomerName,
-                    booking.ReferenceCode,
-                    dateStr,
-                    timeRange,
-                    null,
-                    amountStr
-                );
-            }
+                    booking.CustomerEmail, booking.CustomerName, booking.ReferenceCode, dateStr, timeRange, null, amountStr);
             else if (booking.Status == "refunded" && booking.TotalAmount > 0)
-            {
                 await _email.NotifyCustomerBookingRefundedAsync(
-                    booking.CustomerEmail,
-                    booking.CustomerName,
-                    booking.ReferenceCode,
-                    dateStr,
-                    timeRange,
-                    amountStr
-                );
-            }
+                    booking.CustomerEmail, booking.CustomerName, booking.ReferenceCode, dateStr, timeRange, amountStr);
         }
-        catch
-        {
-            // Never let an email failure fail the underlying status update.
-        }
+        catch { }
     }
 
-    // ✅ UPDATED: No longer static, fetches actual court names for the slots
     private BookingDto MapToDto(Booking b, string courtName)
     {
-        // Filter out any null CourtIds just in case
         var courtIds = b.Slots
             .Where(s => s.CourtId.HasValue)
             .Select(s => s.CourtId!.Value)
@@ -500,10 +458,8 @@ public class BookingService : IBookingService
             b.Date.ToString("yyyy-MM-dd"),
             b.Slots.Select(s =>
             {
-                // ✅ FIX: Extract the Guid value first to avoid Nullable<Guid> mismatch
                 var cId = s.CourtId.GetValueOrDefault();
                 var name = courtNames.TryGetValue(cId, out var resolvedName) ? resolvedName : "Court";
-
                 return new TimeSlotDto(
                     s.Id.ToString(),
                     cId.ToString(),
@@ -538,6 +494,9 @@ public class BookingService : IBookingService
         if (!DateTime.TryParse(request.Date, out var bookingDate))
             throw new InvalidOperationException("Invalid date format");
 
+        // ✅ FIX — SpecifyKind was missing in the original staff method
+        bookingDate = DateTime.SpecifyKind(bookingDate.Date, DateTimeKind.Utc);
+
         await EnsureWithinAdvanceWindowAsync(clientId, bookingDate);
 
         if (request.Slots == null || !request.Slots.Any())
@@ -550,55 +509,28 @@ public class BookingService : IBookingService
             if (!TimeOnly.TryParse(slot.EndTime, out var endTime))
                 throw new InvalidOperationException($"Invalid end time: {slot.EndTime}");
 
-            var conflicting = await _db.Bookings
-                .Where(b => b.CourtId == courtGuid
-                    && b.Date == bookingDate
-                    && b.Status != "cancelled"
-                    && b.Status != "expired"
-                    && b.Status != "rejected"
-                    && b.Status != "refunded")
-                .SelectMany(b => b.Slots)
-                .Where(s => s.Date == bookingDate
-                    && s.StartTime < endTime
-                    && s.EndTime > startTime)
-                .AnyAsync();
+            // ✅ FIX — conflict check queries TimeSlots directly.
+            // An "expired" booking still owns its timeslot rows.
+            var conflicting = await HasTimeslotConflictAsync(
+                courtGuid, bookingDate, startTime, endTime);
 
             if (conflicting)
-                throw new InvalidOperationException($"Time slot {slot.StartTime}-{slot.EndTime} is already booked");
+                throw new InvalidOperationException(
+                    $"Time slot {slot.StartTime}-{slot.EndTime} is already booked");
         }
 
         var mode = (request.PaymentMode ?? "cash").ToLowerInvariant();
-        string status;
-        string paymentMethod;
+        string status, paymentMethod;
         DateTime? expiresAt;
 
         switch (mode)
         {
-            case "gcash":
-                status = "pending_payment";
-                paymentMethod = "gcash";
-                expiresAt = DateTime.UtcNow.AddMinutes(15);
-                break;
-
-            case "pay_later":
-                status = "pending_payment";
-                paymentMethod = "cash";
-                expiresAt = null;
-                break;
-
+            case "gcash": status = "pending_payment"; paymentMethod = "gcash"; expiresAt = DateTime.UtcNow.AddMinutes(15); break;
+            case "pay_later": status = "pending_payment"; paymentMethod = "cash"; expiresAt = null; break;
             case "free":
-            case "comp":
-                status = "confirmed";
-                paymentMethod = "comp";
-                expiresAt = null;
-                break;
-
+            case "comp": status = "confirmed"; paymentMethod = "comp"; expiresAt = null; break;
             case "cash":
-            default:
-                status = "confirmed";
-                paymentMethod = "cash";
-                expiresAt = null;
-                break;
+            default: status = "confirmed"; paymentMethod = "cash"; expiresAt = null; break;
         }
 
         decimal totalAmount;
@@ -613,13 +545,11 @@ public class BookingService : IBookingService
                 .FirstAsync(c => c.Id == courtGuid);
 
             var dateOnly = DateOnly.FromDateTime(bookingDate);
-
             decimal sum = 0m;
             foreach (var slot in request.Slots)
             {
                 if (!TimeOnly.TryParse(slot.StartTime, out var st)) continue;
                 if (!TimeOnly.TryParse(slot.EndTime, out var en)) continue;
-
                 var hours = (decimal)(en - st).TotalHours;
                 var ratePerHour = _pricingRuleService.ResolvePriceFromCourt(courtWithRules, dateOnly, st);
                 sum += ratePerHour * hours;
@@ -662,13 +592,10 @@ public class BookingService : IBookingService
             try
             {
                 await _email.NotifyCustomerBookingConfirmedAsync(
-                    booking.CustomerEmail,
-                    booking.CustomerName,
-                    booking.ReferenceCode,
+                    booking.CustomerEmail, booking.CustomerName, booking.ReferenceCode,
                     booking.Date.ToString("yyyy-MM-dd"),
                     string.Join(", ", booking.Slots.Select(s => $"{s.StartTime:HH:mm} - {s.EndTime:HH:mm}")),
-                    $"?{booking.TotalAmount:N2}"
-                );
+                    $"?{booking.TotalAmount:N2}");
             }
             catch { }
         }
@@ -677,22 +604,18 @@ public class BookingService : IBookingService
     }
 
     public async Task<RescheduleBookingResponse> RescheduleBookingAsync(
-        Guid id,
-        RescheduleBookingRequest request,
-        Guid clientId)
+        Guid id, RescheduleBookingRequest request, Guid clientId)
     {
         if (request.Slots == null || !request.Slots.Any())
             throw new InvalidOperationException("At least one time slot is required");
 
         var booking = await _db.Bookings
-            .Include(b => b.Slots)
-            .Include(b => b.Court)
+            .Include(b => b.Slots).Include(b => b.Court)
             .FirstOrDefaultAsync(b => b.Id == id && b.ClientId == clientId)
             ?? throw new KeyNotFoundException("Booking not found");
 
         if (booking.Status is "cancelled" or "rejected" or "expired" or "refunded")
-            throw new InvalidOperationException(
-                $"Cannot reschedule a booking that is already {booking.Status}");
+            throw new InvalidOperationException($"Cannot reschedule a booking that is already {booking.Status}");
 
         var targetCourtId = booking.CourtId;
         if (!string.IsNullOrWhiteSpace(request.CourtId))
@@ -725,54 +648,38 @@ public class BookingService : IBookingService
             if (!TimeOnly.TryParse(s.EndTime, out var en))
                 throw new InvalidOperationException($"Invalid end time: {s.EndTime}");
             if (en <= st)
-                throw new InvalidOperationException(
-                    $"Slot end must be after start: {s.StartTime}-{s.EndTime}");
+                throw new InvalidOperationException($"Slot end must be after start: {s.StartTime}-{s.EndTime}");
             newSlots.Add((st, en));
         }
 
         var ordered = newSlots.OrderBy(s => s.Start).ToList();
         for (int i = 1; i < ordered.Count; i++)
-        {
             if (ordered[i].Start < ordered[i - 1].End)
                 throw new InvalidOperationException("New slots overlap each other");
-        }
 
         var openHour = targetCourt.OpenTime.Hour;
         var closeHour = targetCourt.CloseTime.Hour == 0 ? 24 : targetCourt.CloseTime.Hour;
-
         foreach (var (start, end) in ordered)
         {
             var endHour = end.Hour == 0 ? 24 : end.Hour;
             if (start.Hour < openHour || endHour > closeHour)
-                throw new InvalidOperationException(
-                    $"{start:HH\\:mm}-{end:HH\\:mm} is outside this court's operating hours");
+                throw new InvalidOperationException($"{start:HH\\:mm}-{end:HH\\:mm} is outside this court's operating hours");
         }
 
         foreach (var (start, end) in ordered)
         {
-            var conflicting = await _db.Bookings
-                .Where(b => b.Id != booking.Id
-                         && b.CourtId == targetCourtId
-                         && b.Date == targetDate
-                         && b.Status != "cancelled"
-                         && b.Status != "expired"
-                         && b.Status != "rejected"
-                         && b.Status != "refunded")
-                .SelectMany(b => b.Slots)
-                .Where(s => s.Date == targetDate
-                         && s.StartTime < end
-                         && s.EndTime > start)
-                .AnyAsync();
+            // ✅ FIX — exclude only the booking being rescheduled
+            var conflicting = await HasTimeslotConflictAsync(
+                targetCourtId, targetDate, start, end, excludeBookingId: booking.Id);
 
             if (conflicting)
-                throw new InvalidOperationException(
-                    $"Time slot {start:HH\\:mm}-{end:HH\\:mm} is already booked on this court");
+                throw new InvalidOperationException($"Time slot {start:HH\\:mm}-{end:HH\\:mm} is already booked on this court");
         }
 
         var blocked = await _db.BlockedDates
             .Where(bd => bd.ClientId == clientId
-                      && bd.Date == targetDate
-                      && (bd.CourtId == null || bd.CourtId == targetCourtId))
+                && bd.Date == targetDate
+                && (bd.CourtId == null || bd.CourtId == targetCourtId))
             .ToListAsync();
 
         foreach (var bd in blocked)
@@ -784,11 +691,8 @@ public class BookingService : IBookingService
             var blockEnd = bd.EndTime ?? new TimeOnly(23, 59);
 
             foreach (var (start, end) in ordered)
-            {
                 if (start < blockEnd && end > blockStart)
-                    throw new InvalidOperationException(
-                        $"Time slot {start:HH\\:mm}-{end:HH\\:mm} overlaps a blocked window");
-            }
+                    throw new InvalidOperationException($"Time slot {start:HH\\:mm}-{end:HH\\:mm} overlaps a blocked window");
         }
 
         var previousDate = booking.Date;
@@ -801,7 +705,7 @@ public class BookingService : IBookingService
             .Select(s => new TimeSlotDto(
                 s.Id.ToString(),
                 s.CourtId.ToString(),
-                previousCourtName, // ✅ Added CourtName
+                previousCourtName,
                 s.Date.ToString("yyyy-MM-dd"),
                 s.StartTime.ToString("HH:mm"),
                 s.EndTime.ToString("HH:mm"),
@@ -849,8 +753,7 @@ public class BookingService : IBookingService
             (string.IsNullOrWhiteSpace(request.StaffNotes) ? "" : $" · Staff: {request.StaffNotes}");
 
         booking.Notes = string.IsNullOrWhiteSpace(booking.Notes)
-            ? changeSummary
-            : $"{booking.Notes}\n{changeSummary}";
+            ? changeSummary : $"{booking.Notes}\n{changeSummary}";
 
         await _db.SaveChangesAsync();
 
@@ -859,9 +762,7 @@ public class BookingService : IBookingService
             try
             {
                 await _email.NotifyCustomerBookingRescheduledAsync(
-                    booking.CustomerEmail,
-                    booking.CustomerName,
-                    booking.ReferenceCode,
+                    booking.CustomerEmail, booking.CustomerName, booking.ReferenceCode,
                     previousDate.ToString("yyyy-MM-dd"),
                     string.Join(", ", previousSlots.Select(s => $"{s.StartTime}-{s.EndTime}")),
                     previousCourtName,
@@ -875,9 +776,6 @@ public class BookingService : IBookingService
         }
 
         var delta = newTotal - previousAmount;
-        var balanceDue = delta > 0 ? delta : 0m;
-        var refundDue = delta < 0 ? -delta : 0m;
-
         return new RescheduleBookingResponse(
             MapToDto(booking, targetCourt.Name),
             previousSlots,
@@ -886,9 +784,8 @@ public class BookingService : IBookingService
             previousCourtName,
             previousAmount,
             newTotal,
-            balanceDue,
-            refundDue
-        );
+            delta > 0 ? delta : 0m,
+            delta < 0 ? -delta : 0m);
     }
 
     public async Task<List<BookingSummaryDto>> TrackBookingSummariesByEmailAsync(string email, Guid clientId)

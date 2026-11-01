@@ -604,13 +604,15 @@ public class BookingService : IBookingService
     }
 
     public async Task<RescheduleBookingResponse> RescheduleBookingAsync(
-     Guid id, RescheduleBookingRequest request, Guid clientId)
+    Guid id, RescheduleBookingRequest request, Guid clientId)
     {
         if (request.Slots == null || !request.Slots.Any())
             throw new InvalidOperationException("At least one time slot is required");
 
+        // ✅ CRITICAL: Do NOT .Include(b => b.Slots). The booking is loaded for UPDATE only.
+        //    Slots are managed via raw SQL + AddRange below, bypassing the change tracker.
         var booking = await _db.Bookings
-            .Include(b => b.Slots).Include(b => b.Court)
+            .Include(b => b.Court)
             .FirstOrDefaultAsync(b => b.Id == id && b.ClientId == clientId)
             ?? throw new KeyNotFoundException("Booking not found");
 
@@ -666,10 +668,16 @@ public class BookingService : IBookingService
                 throw new InvalidOperationException($"{start:HH\\:mm}-{end:HH\\:mm} is outside this court's operating hours");
         }
 
+        // Conflict check — queries TimeSlots directly, excluding this booking
         foreach (var (start, end) in ordered)
         {
-            var conflicting = await HasTimeslotConflictAsync(
-                targetCourtId, targetDate, start, end, excludeBookingId: booking.Id);
+            var conflicting = await _db.TimeSlots
+                .Where(s => s.CourtId == targetCourtId
+                         && s.Date == targetDate
+                         && s.StartTime < end
+                         && s.EndTime > start
+                         && s.BookingId != booking.Id)
+                .AnyAsync();
 
             if (conflicting)
                 throw new InvalidOperationException($"Time slot {start:HH\\:mm}-{end:HH\\:mm} is already booked on this court");
@@ -694,20 +702,31 @@ public class BookingService : IBookingService
                     throw new InvalidOperationException($"Time slot {start:HH\\:mm}-{end:HH\\:mm} overlaps a blocked window");
         }
 
+        // Snapshot previous state (query slots directly, no Include)
+        var previousSlotRows = await _db.TimeSlots
+            .AsNoTracking()
+            .Where(s => s.BookingId == booking.Id)
+            .OrderBy(s => s.StartTime)
+            .ToListAsync();
+
         var previousDate = booking.Date;
         var previousCourtId = booking.CourtId;
         var previousCourtName = booking.Court?.Name ?? "";
         var previousAmount = booking.TotalAmount;
 
-        var previousSlots = booking.Slots
-            .OrderBy(s => s.StartTime)
+        var previousSlots = previousSlotRows
             .Select(s => new TimeSlotDto(
-                s.Id.ToString(), s.CourtId.ToString(), previousCourtName,
+                s.Id.ToString(),
+                s.CourtId.ToString(),
+                previousCourtName,
                 s.Date.ToString("yyyy-MM-dd"),
-                s.StartTime.ToString("HH:mm"), s.EndTime.ToString("HH:mm"),
-                false, s.Price))
+                s.StartTime.ToString("HH:mm"),
+                s.EndTime.ToString("HH:mm"),
+                false,
+                s.Price))
             .ToList();
 
+        // Compute new total
         var dateOnly = DateOnly.FromDateTime(targetDate);
         decimal newTotal = 0m;
         var perSlotPrices = new List<decimal>();
@@ -721,41 +740,70 @@ public class BookingService : IBookingService
             newTotal += price;
         }
 
-        // ✅ Reload slots from DB before removing — they may have been
-        // deleted by cleanup or the FreeSlotsIfTerminal code, which would
-        // otherwise cause "expected 1 row, affected 0" concurrency exceptions.
-        await _db.Entry(booking).Collection(b => b.Slots).LoadAsync();
+        // ✅ CRITICAL: Use a transaction so DELETE + INSERT + UPDATE are atomic
+        using var tx = await _db.Database.BeginTransactionAsync();
+        try
+        {
+            // ✅ Delete old timeslots via raw SQL — bypasses EF change tracker entirely.
+            //    Safe even if they were already deleted by cleanup/cascade.
+            await _db.Database.ExecuteSqlRawAsync(
+                "DELETE FROM timeslots WHERE \"BookingId\" = {0}",
+                booking.Id);
 
-        _db.TimeSlots.RemoveRange(booking.Slots);
+            // ✅ Insert new timeslots as independent entities (not via booking.Slots)
+            var newTimeSlots = ordered
+                .Select((s, i) => new TimeSlot
+                {
+                    BookingId = booking.Id,
+                    CourtId = targetCourtId,
+                    Date = targetDate,
+                    StartTime = s.Start,
+                    EndTime = s.End,
+                    Price = perSlotPrices[i]
+                })
+                .ToList();
 
-        booking.Slots = ordered
-            .Select((s, i) => new TimeSlot
-            {
-                BookingId = booking.Id,
-                CourtId = targetCourtId,
-                Date = targetDate,
-                StartTime = s.Start,
-                EndTime = s.End,
-                Price = perSlotPrices[i]
-            })
-            .ToList();
+            _db.TimeSlots.AddRange(newTimeSlots);
 
-        booking.CourtId = targetCourtId;
-        booking.Court = targetCourt;
-        booking.Date = targetDate;
-        booking.TotalAmount = newTotal;
+            // Update booking fields (this is the only modification EF tracks on booking)
+            booking.CourtId = targetCourtId;
+            booking.Court = targetCourt;
+            booking.Date = targetDate;
+            booking.TotalAmount = newTotal;
 
-        var changeSummary =
-            $"[RESCHEDULED {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC] " +
-            $"{previousDate:yyyy-MM-dd} {previousCourtName} " +
-            $"→ {targetDate:yyyy-MM-dd} {targetCourt.Name}" +
-            (string.IsNullOrWhiteSpace(request.Reason) ? "" : $" · Reason: {request.Reason}") +
-            (string.IsNullOrWhiteSpace(request.StaffNotes) ? "" : $" · Staff: {request.StaffNotes}");
+            var changeSummary =
+                $"[RESCHEDULED {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC] " +
+                $"{previousDate:yyyy-MM-dd} {previousCourtName} " +
+                $"→ {targetDate:yyyy-MM-dd} {targetCourt.Name}" +
+                (string.IsNullOrWhiteSpace(request.Reason) ? "" : $" · Reason: {request.Reason}") +
+                (string.IsNullOrWhiteSpace(request.StaffNotes) ? "" : $" · Staff: {request.StaffNotes}");
 
-        booking.Notes = string.IsNullOrWhiteSpace(booking.Notes)
-            ? changeSummary : $"{booking.Notes}\n{changeSummary}";
+            booking.Notes = string.IsNullOrWhiteSpace(booking.Notes)
+                ? changeSummary : $"{booking.Notes}\n{changeSummary}";
 
-        await _db.SaveChangesAsync();
+            await _db.SaveChangesAsync();
+            await tx.CommitAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            await tx.RollbackAsync();
+            throw new KeyNotFoundException(
+                "This booking was deleted or modified by another process. Refresh and try again.");
+        }
+        catch
+        {
+            await tx.RollbackAsync();
+            throw;
+        }
+
+        // Reload slots for the DTO (the new ones we just inserted)
+        var newSlotRows = await _db.TimeSlots
+            .AsNoTracking()
+            .Where(s => s.BookingId == booking.Id)
+            .OrderBy(s => s.StartTime)
+            .ToListAsync();
+
+        booking.Slots = newSlotRows;
 
         if (!string.IsNullOrWhiteSpace(booking.CustomerEmail))
         {

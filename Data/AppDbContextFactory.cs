@@ -2,10 +2,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.Extensions.Configuration;
 
-using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Design;
-using Microsoft.Extensions.Configuration;
-
 namespace SmashPointBookingAPI.Data;
 
 public class AppDbContextFactory : IDesignTimeDbContextFactory<AppDbContext>
@@ -16,7 +12,7 @@ public class AppDbContextFactory : IDesignTimeDbContextFactory<AppDbContext>
             .SetBasePath(Directory.GetCurrentDirectory())
             .AddJsonFile("appsettings.json")
             .AddJsonFile("appsettings.Development.json", optional: true)
-            .AddEnvironmentVariables()   // ← NEW — makes dotnet ef see $env:ConnectionStrings__DefaultConnection
+            .AddEnvironmentVariables()   // makes dotnet ef see $env:ConnectionStrings__DefaultConnection
             .Build();
 
         var optionsBuilder = new DbContextOptionsBuilder<AppDbContext>();

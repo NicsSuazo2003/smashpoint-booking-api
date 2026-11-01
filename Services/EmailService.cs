@@ -621,6 +621,58 @@ public class EmailService
     }
 
     // -------------------------------------------------------------
+    // 7. ADMIN/STAFF — Password Reset
+    // -------------------------------------------------------------
+    public async Task SendPasswordResetEmailAsync(
+        string recipientName,
+        string recipientEmail,
+        string rawToken,
+        int expiryMinutes)
+    {
+        try
+        {
+            var apiKey = _config["Brevo:ApiKey"];
+            var senderEmail = _config["Brevo:SenderEmail"];
+            var senderName = _config["Brevo:SenderName"];
+            var frontendUrl = _config["App:FrontendUrl"];
+
+            var resetUrl = $"{frontendUrl}/reset-password?token={Uri.EscapeDataString(rawToken)}";
+
+            var content = $@"
+              <p style='margin:0 0 8px;font-size:15px;color:{TEXT_CREAM_DARK};'>
+                Hi {recipientName},
+              </p>
+              <p style='margin:0 0 24px;font-size:15px;line-height:1.65;color:{TEXT_CREAM_DARK};'>
+                A password reset was requested for your Smash Point admin account. If this was you, click the button below to set a new password.
+              </p>
+
+              {CtaButton(resetUrl, "Reset My Password")}
+
+              <p style='margin:24px 0 0;font-size:13px;line-height:1.65;color:{TEXT_CREAM_MUTED};'>
+                This link expires in <strong style='color:{TEXT_CREAM};'>{expiryMinutes} minutes</strong>. If you did not request this, you can safely ignore this email — your password will not change.
+              </p>
+
+              <div style='margin-top:20px;padding:12px 14px;background-color:{BODY_BG};border:1px solid {DIVIDER};border-radius:8px;'>
+                <div style='font-size:10px;font-weight:800;letter-spacing:1.5px;color:{TEXT_CREAM_MUTED};text-transform:uppercase;margin-bottom:5px;'>
+                  Or copy this link
+                </div>
+                <div style='font-size:11px;color:{TEXT_CREAM};word-break:break-all;font-family:monospace;line-height:1.5;'>
+                  {resetUrl}
+                </div>
+              </div>
+            ";
+
+            var html = WrapLayout("Reset Your Password", content);
+            await SendAsync(apiKey, senderEmail, senderName, recipientEmail, recipientName,
+                "Reset Your Smash Point Password", html);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Password reset email failed for {Email}", recipientEmail);
+        }
+    }
+
+    // -------------------------------------------------------------
     // Shared sender
     // -------------------------------------------------------------
     private async Task SendAsync(

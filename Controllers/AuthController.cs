@@ -1,7 +1,7 @@
-// Controllers/AuthController.cs
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using SmashPointBookingAPI.DTOs;
 using SmashPointBookingAPI.Interfaces;
 using SmashPointBookingAPI.Middleware;
@@ -32,13 +32,17 @@ public class AuthController : ControllerBase
     }
 
     [HttpPost("login")]
+    [EnableRateLimiting("auth")]
     public async Task<ActionResult<AuthResponse>> Login(LoginRequest request)
     {
-        var response = await _auth.LoginAsync(request);
+        var ip = HttpContext.Connection.RemoteIpAddress?.ToString();
+        var ua = HttpContext.Request.Headers["User-Agent"].FirstOrDefault();
+        var response = await _auth.LoginAsync(request, ip, ua);
         return Ok(response);
     }
 
     [HttpPost("register")]
+    [EnableRateLimiting("auth")]
     public async Task<ActionResult<AuthResponse>> Register(RegisterRequest request)
     {
         var clientId = await GetClientId();
@@ -56,10 +60,20 @@ public class AuthController : ControllerBase
     }
 
     [HttpPost("forgot-password")]
+    [EnableRateLimiting("auth")]
     public async Task<IActionResult> ForgotPassword(ForgotPasswordRequest request)
     {
         await _auth.ForgotPasswordAsync(request.Email);
         return Ok(new { message = "If an account exists, a reset link has been sent" });
+    }
+
+    [HttpPost("reset-password")]
+    [EnableRateLimiting("auth")]
+    public async Task<IActionResult> ResetPassword(ResetPasswordRequest request)
+    {
+        // 🔒 Fix A: actually reset the password. Service validates the token hash + expiry.
+        await _auth.ResetPasswordAsync(request.Token, request.NewPassword);
+        return Ok(new { message = "Password reset successfully" });
     }
 
     [Authorize, HttpPut("profile")]

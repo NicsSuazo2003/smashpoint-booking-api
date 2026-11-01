@@ -1,4 +1,4 @@
-// Controllers/AdminController.cs
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using SmashPointBookingAPI.DTOs;
@@ -33,17 +33,32 @@ public class AdminController : ControllerBase
         _pricingRuleService = pricingRuleService;
     }
 
+    /// <summary>
+    /// Resolves the effective client for this request AND (🔒 Fix D)
+    /// verifies it matches the authenticated user's tenant claim.
+    /// </summary>
     private async Task<Guid> GetClientId()
     {
         var subdomain = _clientResolver.GetSubdomain();
         if (string.IsNullOrEmpty(subdomain))
             throw new UnauthorizedAccessException("Client identification required");
 
-        return await _clientService.GetClientIdBySubdomainAsync(subdomain);
+        var resolved = await _clientService.GetClientIdBySubdomainAsync(subdomain);
+
+        if (User?.Identity?.IsAuthenticated == true)
+        {
+            var claimRaw = User.FindFirstValue("client_id");
+            if (!Guid.TryParse(claimRaw, out var jwtClientId) || jwtClientId != resolved)
+            {
+                throw new UnauthorizedAccessException("Client identification required");
+            }
+        }
+
+        return resolved;
     }
 
     // ========================================
-    // ✅ STAFF & ADMIN ACCESS
+    // STAFF & ADMIN ACCESS
     // ========================================
 
     [HttpGet("bookings")]
@@ -76,8 +91,8 @@ public class AdminController : ControllerBase
     [HttpPatch("bookings/{id}/reschedule")]
     [Authorize(Roles = "admin,staff")]
     public async Task<ActionResult<RescheduleBookingResponse>> RescheduleBooking(
-    Guid id,
-    RescheduleBookingRequest request)
+        Guid id,
+        RescheduleBookingRequest request)
     {
         var clientId = await GetClientId();
         var result = await _booking.RescheduleBookingAsync(id, request, clientId);
@@ -85,7 +100,7 @@ public class AdminController : ControllerBase
     }
 
     // ========================================
-    // ✅ ADMIN ONLY ACCESS
+    // ADMIN ONLY ACCESS
     // ========================================
 
     [HttpGet("analytics")]
@@ -108,7 +123,6 @@ public class AdminController : ControllerBase
         return Ok(analytics);
     }
 
-    // ✅ FIXED — staff now allowed to READ courts (needed for manual booking modal)
     [HttpGet("courts")]
     [Authorize(Roles = "admin,staff")]
     public async Task<ActionResult<List<CourtDto>>> GetCourts()
@@ -158,8 +172,18 @@ public class AdminController : ControllerBase
     [Authorize(Roles = "admin")]
     public async Task<ActionResult<ClientDto>> GetSettings()
     {
+        // 🔒 Fix D: tenant claim guard also applies here (this endpoint bypasses GetClientId).
         var subdomain = _clientResolver.GetSubdomain();
-        var client = await _clientService.GetClientBySubdomainAsync(subdomain!);
+        if (string.IsNullOrEmpty(subdomain))
+            throw new UnauthorizedAccessException("Client identification required");
+
+        var resolved = await _clientService.GetClientIdBySubdomainAsync(subdomain);
+
+        var claimRaw = User.FindFirstValue("client_id");
+        if (!Guid.TryParse(claimRaw, out var jwtClientId) || jwtClientId != resolved)
+            throw new UnauthorizedAccessException("Client identification required");
+
+        var client = await _clientService.GetClientBySubdomainAsync(subdomain);
         return Ok(client);
     }
 
@@ -173,27 +197,7 @@ public class AdminController : ControllerBase
     }
 
     // ========================================
-    // ⚠️ DEBUG ENDPOINTS
-    // ========================================
-
-    [HttpGet("debug-headers")]
-    [AllowAnonymous]
-    public IActionResult DebugHeaders()
-    {
-        var headers = Request.Headers.ToDictionary(h => h.Key, h => h.Value.ToString());
-        return Ok(headers);
-    }
-
-    [HttpGet("debug-subdomain")]
-    [AllowAnonymous]
-    public IActionResult DebugSubdomain()
-    {
-        var subdomain = _clientResolver.GetSubdomain();
-        return Ok(new { subdomain, host = Request.Host.Host });
-    }
-
-    // ========================================
-    // ✅ STAFF MANAGEMENT
+    // STAFF MANAGEMENT
     // ========================================
 
     [HttpGet("staff")]
@@ -233,7 +237,7 @@ public class AdminController : ControllerBase
     }
 
     // ========================================
-    // ✅ PRICING RULES
+    // PRICING RULES
     // ========================================
 
     [HttpGet("courts/{courtId}/pricing-rules")]

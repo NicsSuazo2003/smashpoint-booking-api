@@ -270,6 +270,7 @@ builder.Services.AddRateLimiter(options =>
 // ─── Services ────────────────────────────────────────────
 builder.Services.AddSingleton<EmailService>();
 builder.Services.AddScoped<TokenService>();
+builder.Services.AddScoped<ClientResolver>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<ICourtService, CourtService>();
 builder.Services.AddScoped<IBookingService, BookingService>();

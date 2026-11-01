@@ -292,7 +292,12 @@ public class AppDbContext : DbContext
         {
             foreach (var property in entityType.GetProperties())
             {
-                if (property.ClrType == typeof(DateTime) || property.ClrType == typeof(DateTime?))
+                // Only apply NOW() default to required DateTime.
+                // Nullable DateTime? must default to NULL — the null is meaningful
+                // (e.g. LockoutUntil = null means "not locked",
+                // PasswordResetExpiresAt = null means "no pending reset",
+                // BookingOpenDate = null means "no window configured").
+                if (property.ClrType == typeof(DateTime))
                 {
                     property.SetDefaultValueSql("NOW() AT TIME ZONE 'UTC'");
                 }

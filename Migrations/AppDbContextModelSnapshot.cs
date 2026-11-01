@@ -106,9 +106,7 @@ namespace SmashPointBookingAPI.Migrations
                         .HasColumnName("OpenPlaySessionId");
 
                     b.Property<DateTime?>("PaymentExpiresAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
-                        .HasDefaultValueSql("NOW() AT TIME ZONE 'UTC'");
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("PaymentMethod")
                         .IsRequired()
@@ -142,6 +140,9 @@ namespace SmashPointBookingAPI.Migrations
 
                     b.HasIndex("OpenPlaySessionId");
 
+                    b.HasIndex("ReferenceCode")
+                        .IsUnique();
+
                     b.HasIndex("UserId");
 
                     b.ToTable("bookings");
@@ -162,6 +163,21 @@ namespace SmashPointBookingAPI.Migrations
                     b.Property<string>("AvailableAmenitiesJson")
                         .HasColumnType("jsonb")
                         .HasColumnName("available_amenities_json");
+
+                    b.Property<DateTime?>("BookingCloseDate")
+                        .HasColumnType("date")
+                        .HasColumnName("booking_close_date");
+
+                    b.Property<DateTime?>("BookingOpenDate")
+                        .HasColumnType("date")
+                        .HasColumnName("booking_open_date");
+
+                    b.Property<string>("BookingWindowMode")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("text")
+                        .HasDefaultValue("rolling")
+                        .HasColumnName("booking_window_mode");
 
                     b.Property<bool>("BookingsEnabled")
                         .HasColumnType("boolean")
@@ -567,7 +583,7 @@ namespace SmashPointBookingAPI.Migrations
                         .HasColumnName("Message");
 
                     b.Property<string>("Metadata")
-                        .HasColumnType("text")
+                        .HasColumnType("jsonb")
                         .HasColumnName("Metadata");
 
                     b.Property<DateTime>("OccurredAt")
@@ -595,7 +611,13 @@ namespace SmashPointBookingAPI.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("security_events");
+                    b.HasIndex("ClientId", "OccurredAt")
+                        .HasDatabaseName("ix_secevents_client_time");
+
+                    b.HasIndex("ClientId", "EventType", "OccurredAt")
+                        .HasDatabaseName("ix_secevents_type_time");
+
+                    b.ToTable("security_events", (string)null);
                 });
 
             modelBuilder.Entity("SmashPointBookingAPI.Entities.TimeSlot", b =>
@@ -628,7 +650,9 @@ namespace SmashPointBookingAPI.Migrations
 
                     b.HasIndex("BookingId");
 
-                    b.HasIndex("CourtId");
+                    b.HasIndex("CourtId", "Date", "StartTime")
+                        .IsUnique()
+                        .HasFilter("\"CourtId\" IS NOT NULL");
 
                     b.ToTable("timeslots");
                 });
@@ -658,12 +682,24 @@ namespace SmashPointBookingAPI.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<int>("FailedLoginCount")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("LockoutUntil")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("text");
 
                     b.Property<string>("PasswordHash")
                         .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("PasswordResetExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PasswordResetTokenHash")
                         .HasColumnType("text");
 
                     b.Property<string>("Phone")

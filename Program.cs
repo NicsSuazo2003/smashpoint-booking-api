@@ -290,18 +290,27 @@ builder.Services.AddSwaggerGen();
 
 // ─── CORS ────────────────────────────────────────────────
 var corsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
-    ?? new[]
-    {
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "https://smashpoint-booking.vercel.app",
-        "https://smashpoint.vercel.app",
-    };
+    ?? Array.Empty<string>();
+
+// These origins are ALWAYS allowed, regardless of what appsettings.json
+// or Render env vars say. Union with config + dedupe case-insensitively.
+var requiredOrigins = new[]
+{
+    "https://smashpointpicklecenter.vercel.app",
+    "https://smashpoint-booking.vercel.app",
+    "https://smashpoint.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+};
+
+var finalCorsOrigins = corsOrigins
+    .Union(requiredOrigins, StringComparer.OrdinalIgnoreCase)
+    .ToArray();
 
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("Frontend", policy =>
-        policy.WithOrigins(corsOrigins)
+        policy.WithOrigins(finalCorsOrigins)
               .AllowAnyHeader()
               .AllowAnyMethod()
               .AllowCredentials());
